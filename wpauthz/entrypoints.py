@@ -40,8 +40,11 @@ from .php import (
     Function,
     blank_noncode,
     calls,
+    classes,
+    enclosing_class,
     functions,
     literal,
+    match_brace,
     property_literals,
 )
 
@@ -106,6 +109,7 @@ class EntryPoint:
     line: int
     permission_callback: str | None = None
     resolved: Function | None = None
+    owner_class: str | None = None
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -165,18 +169,118 @@ _INTERPOLATED = re.compile(
 )
 
 
-def interpolated_hook(argument: str) -> tuple[str, str] | None:
-    """(literal prefix, property name) for a hook name built by interpolation."""
+def interpolated_hook(argument: str) -> tuple[str, str, bool] | None:
+    """(prefix, name, is_property) for a hook name built by interpolation.
+
+    `is_property` distinguishes `$this->action`, whose value can be resolved
+    from a class, from a bare `$action`, which inside a helper such as
+    `register_ajax( $action, $callback )` is a parameter and takes whatever the
+    caller passes. Treating the two alike meant every literal seen anywhere in
+    the plugin was pasted into every generic registration site — one plugin
+    gained four nopriv endpoints that a live $wp_filter dump says do not exist.
+    """
     match = _INTERPOLATED.match(argument)
     if not match:
         return None
     prefix = match.group("prefix") or match.group("prefix2")
     prop = match.group("prop") or match.group("prop2")
-    return (prefix, prop) if prefix and prop else None
+    if not (prefix and prop):
+        return None
+    is_property = "this->" in argument
+    return prefix, prop, is_property
+
+
+_CONDITIONAL = re.compile(r"if\s*\(\s*\$this->([A-Za-z_]\w*)\s*\)\s*\{")
+
+
+def _gating_properties(blanked: str, offset: int) -> list[str]:
+    """Properties whose truthiness gates the statement at `offset`.
+
+    A base class that registers its public hook as
+
+        if ( $this->public ) { add_action( "wp_ajax_nopriv_{$this->action}", ... ); }
+
+    is not saying "this endpoint is public". It is saying "this endpoint is
+    public for whichever subclass sets public = true". Ignoring the condition
+    invents endpoints: a live $wp_filter dump of one plugin listed 9 nopriv
+    actions where ignoring it predicted 13.
+    """
+    gating = []
+    for match in _CONDITIONAL.finditer(blanked):
+        brace = match.end() - 1
+        if brace < offset < match_brace(blanked, brace):
+            gating.append(match.group(1))
+    return gating
+
+
+def _expand_interpolated(
+    path: Path,
+    call: Call,
+    resolved: tuple[str, str],
+    known: dict[str, set[str]],
+    index,
+    blanked: str,
+    own_classes: list,
+    resolve,
+) -> list[EntryPoint]:
+    """One entry point per class that actually produces this hook name."""
+    prefix, prop, is_property = resolved
+    found: list[EntryPoint] = []
+    gating = _gating_properties(blanked, call.start)
+
+    owner = enclosing_class(own_classes, call.start)
+    table = getattr(index, "class_table", None) if index is not None else None
+
+    candidates: list[tuple[str | None, str]] = []
+    if table and owner and owner.name in table:
+        # Ask which subclasses actually reach this registration and what each
+        # sets the property to, honouring any `if ( $this->x )` gate.
+        for class_name in index.descendants(owner.name):
+            if any(index.resolve_bool(class_name, g) is False for g in gating):
+                continue  # this subclass switches the registration off
+            value = index.resolve_string(class_name, prop)
+            if value:
+                candidates.append((class_name, value))
+    elif is_property:
+        # A property with no class context: fall back to every literal seen for
+        # that name. Crude, but the name still scopes it.
+        candidates = [(None, value) for value in sorted(known.get(prop, ()))]
+    else:
+        # A bare variable in a generic helper takes whatever the caller passes.
+        # There is nothing to resolve, and guessing invents endpoints.
+        return []
+
+    seen: set[str] = set()
+    for class_name, value in candidates:
+        candidate = prefix + value
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        kind = _hook_kind(candidate)
+        if not kind:
+            continue
+        entry = resolve(
+            EntryPoint(
+                kind=kind[0],
+                hook=candidate,
+                callback=callback_name(call.args[1]),
+                file=path,
+                line=call.line,
+                owner_class=class_name,
+            )
+        )
+        entry.notes.append(
+            f"hook name resolved from ${prop}"
+            + (f" on {class_name}" if class_name else "")
+            + "; the literal never appears in the source"
+        )
+        found.append(entry)
+
+    return found
 
 
 def scan_file(
-    path: Path, source: str, properties: dict[str, set[str]] | None = None
+    path: Path, source: str, properties: dict[str, set[str]] | None = None, index=None
 ) -> list[EntryPoint]:
     """Entry points in one file.
 
@@ -190,6 +294,8 @@ def scan_file(
     by_name: dict[str, Function] = {}
     for function in defined:
         by_name.setdefault(function.name, function)
+
+    own_classes = classes(source, blanked)
 
     known = dict(property_literals(source, blanked))
     for name, values in (properties or {}).items():
@@ -214,32 +320,15 @@ def scan_file(
         hook = literal(call.args[0])
 
         if not hook:
-            # The hook name may be built by interpolation from a property. Emit
-            # one entry point per known value of that property; over-reporting
-            # here is the right trade, because the alternative is a hook that is
-            # invisible to the whole tool.
             resolved = interpolated_hook(call.args[0])
             if resolved:
-                prefix, prop = resolved
-                for value in sorted(known.get(prop, ())):
-                    candidate = prefix + value
-                    kind = _hook_kind(candidate)
-                    if not kind:
-                        continue
-                    entry = resolve(
-                        EntryPoint(
-                            kind=kind[0],
-                            hook=candidate,
-                            callback=callback_name(call.args[1]),
-                            file=path,
-                            line=call.line,
-                        )
-                    )
-                    entry.notes.append(
-                        f"hook name resolved from ${prop}; the literal never "
-                        "appears in the source"
-                    )
-                    found.append(entry)
+                expanded = _expand_interpolated(
+                    path, call, resolved, known, index, blanked, own_classes, resolve
+                )
+                if expanded:
+                    found.extend(expanded)
+                else:
+                    unresolved.append(call.args[0][:60])
                 continue
             unresolved.append(call.args[0][:60])
             continue

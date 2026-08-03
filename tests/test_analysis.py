@@ -34,7 +34,7 @@ def findings_for(name: str, with_index: bool = False):
     source = path.read_text(encoding="utf-8")
     index = build_index(FIXTURES) if with_index else None
     properties = index.properties if index else None
-    entries = scan_file(path, source, properties)
+    entries = scan_file(path, source, properties, index)
     return rank(analyse_file(path, source, entries, index))
 
 
@@ -424,6 +424,90 @@ class TestTwinComparison(unittest.TestCase):
         match = [d for d in self.divergences if d.name == "generate_url"][0]
         self.assertIn("free", match.facts)
         self.assertEqual(match.facts["free"].line, 4)
+
+
+class TestInheritanceResolution(unittest.TestCase):
+    """Ground truth: a $wp_filter dump from a live install.
+
+    One plugin's base class registers its public hook behind
+    `if ( $this->public )`. Reading that property from the base and applying it
+    to every subclass predicted 13 nopriv actions where the live site had 9, and
+    attributed one subclass's WP_User_Query to all of them — five findings on
+    one dispatcher line, four of them false.
+    """
+
+    def setUp(self):
+        root = Path(__file__).parent / "inherit"
+        self.index = build_index(root)
+        self.entries = []
+        for path in sorted(root.glob("*.php")):
+            source = path.read_text(encoding="utf-8")
+            self.entries.extend(
+                scan_file(path, source, self.index.properties, self.index)
+            )
+        self.findings = []
+        for path in sorted(root.glob("*.php")):
+            source = path.read_text(encoding="utf-8")
+            found = scan_file(path, source, self.index.properties, self.index)
+            self.findings.extend(analyse_file(path, source, found, self.index))
+
+    def test_only_the_public_subclass_gets_a_nopriv_entry(self):
+        nopriv = {e.hook for e in self.entries if e.kind == "ajax_nopriv"}
+        self.assertEqual(
+            {"wp_ajax_nopriv_demo/ajax/query_users"},
+            nopriv,
+            f"nopriv set does not match the live filter dump: {sorted(nopriv)}",
+        )
+
+    def test_authenticated_variants_still_exist_for_every_subclass(self):
+        ajax = {e.hook for e in self.entries if e.kind == "ajax"}
+        for action in ("query_users", "check_screen", "upgrade"):
+            self.assertIn(f"wp_ajax_demo/ajax/{action}", ajax)
+
+    def test_property_resolves_through_extends(self):
+        self.assertIs(self.index.resolve_bool("Demo_Upgrade", "public"), False)
+        self.assertIs(self.index.resolve_bool("Demo_Query_Users", "public"), True)
+        self.assertEqual(
+            self.index.resolve_string("Demo_Upgrade", "action"), "demo/ajax/upgrade"
+        )
+
+    def test_user_disclosure_is_attributed_to_one_subclass_only(self):
+        disclosing = [
+            f for f in self.findings
+            if any("WP_User_Query" in line for line in f.evidence)
+        ]
+        # query_users legitimately has two variants, authenticated and not.
+        # Any OTHER action appearing here is the misattribution bug.
+        wrong = [f for f in disclosing if "query_users" not in f.entry.hook]
+        self.assertEqual(
+            [], wrong,
+            "the sink was attributed to siblings that do not contain it: "
+            + " | ".join(f.entry.hook for f in wrong),
+        )
+        self.assertTrue(disclosing, "the real disclosure was lost")
+
+
+class TestCompareDeterminism(unittest.TestCase):
+    """A comparison that depends on tree size is worse than no comparison."""
+
+    def setUp(self):
+        from wpauthz.compare import compare
+
+        twins = Path(__file__).parent / "twins"
+        self.divergences = compare([("free", twins / "free"), ("pro", twins / "pro")])
+
+    def test_identical_function_is_not_reported_as_divergent(self):
+        match = [d for d in self.divergences if d.name.endswith("check_submit")]
+        self.assertEqual(
+            [], match,
+            "byte-identical code reported as divergent because an unrelated "
+            "same-named method in the larger tree won the slot: "
+            + " | ".join(f"{d.name}: {d.detail}" for d in match),
+        )
+
+    def test_a_real_asymmetry_is_still_found(self):
+        match = [d for d in self.divergences if d.name.endswith("generate_url")]
+        self.assertTrue(match, "the genuine divergence was lost with the fix")
 
 
 class TestRanking(unittest.TestCase):

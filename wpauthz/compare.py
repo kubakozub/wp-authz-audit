@@ -19,6 +19,15 @@ across four plugins from one vendor, and reading the code showed the missing
 check was defence in depth rather than an exploitable gap. The value is that it
 took ten seconds to find and five minutes to settle, instead of reading four
 plugins end to end.
+
+Functions are matched on their QUALIFIED name (Class::method), plus bare names
+that are unambiguous within every tree — a rebranded fork keeps its method names
+but not its class names. Matching on bare names alone and keeping the longest
+body made results depend on tree SIZE: the larger sibling was likelier to hold
+an unrelated class with a same-named longer method, which won the slot and got
+compared against the wrong code, so byte-identical functions read as divergent.
+A comparison that is not deterministic is worse than none, because every result
+then needs checking against the possibility that it is an artefact.
 """
 
 from __future__ import annotations
@@ -111,13 +120,35 @@ def _facts(root: Path, label: str) -> dict[str, FunctionFacts]:
                 early_exits=sum(blanked_body.count(m) for m in _EARLY_EXIT_MARKERS),
                 length=len(body),
             )
-            # Keep the longest definition when a name repeats: the substantive
-            # one, not a stub or an abstract declaration.
-            existing = collected.get(function.name)
+            # Key by QUALIFIED name. Keying by bare name and keeping the
+            # longest definition made the comparison non-deterministic: a
+            # larger sibling is likelier to contain some other class with a
+            # same-named, longer method, so that unrelated body won the slot
+            # and the two trees were no longer compared like for like. That
+            # produced a divergence on code that was byte-identical, which
+            # undermines the whole premise of comparing siblings.
+            key = function.qualified
+            existing = collected.get(key)
             if existing is None or fact.length > existing.length:
-                collected[function.name] = fact
+                collected[key] = fact
 
     return collected
+
+
+def _merge_keys(facts: dict[str, FunctionFacts]) -> dict[str, FunctionFacts]:
+    """Add bare-name keys for methods whose bare name is unique in this tree."""
+    bare_counts: dict[str, int] = {}
+    for qualified in facts:
+        bare = qualified.rsplit("::", 1)[-1]
+        bare_counts[bare] = bare_counts.get(bare, 0) + 1
+
+    merged = dict(facts)
+    for qualified, fact in facts.items():
+        bare = qualified.rsplit("::", 1)[-1]
+        if bare_counts[bare] == 1 and f"~{bare}" not in merged:
+            # Prefixed so a bare key can never collide with a qualified one.
+            merged[f"~{bare}"] = fact
+    return merged
 
 
 def compare(trees: list[tuple[str, Path]], min_shared: int = 2) -> list[Divergence]:
@@ -128,6 +159,16 @@ def compare(trees: list[tuple[str, Path]], min_shared: int = 2) -> list[Divergen
     three shared definitions turns the majority into a specification.
     """
     per_plugin = {label: _facts(root, label) for label, root in trees}
+
+    # Qualified names match a fork that kept its class names. A fork that
+    # renamed them (a rebrand) still shares method names, so unambiguous bare
+    # names are matched too — "unambiguous" meaning exactly one definition of
+    # that bare name in every tree. Ambiguity was the actual bug: with several
+    # candidates the largest body won, and that depended on tree size.
+    per_plugin = {
+        label: _merge_keys(facts) for label, facts in per_plugin.items()
+    }
+
     names: dict[str, list[str]] = {}
     for label, facts in per_plugin.items():
         for name in facts:
@@ -192,6 +233,15 @@ def compare(trees: list[tuple[str, Path]], min_shared: int = 2) -> list[Divergen
 
     # Guard-call gaps first: they name a specific missing check, which is what a
     # reviewer can act on. Early-exit counts are a weaker, shape-level hint.
+    # A function is matched twice on purpose — once by qualified name, once by
+    # unambiguous bare name — so the same divergence arrives twice. Collapse on
+    # what a reader actually sees.
+    deduped: dict[tuple[str, str], Divergence] = {}
+    for divergence in divergences:
+        divergence.name = divergence.name.lstrip("~")
+        deduped.setdefault((divergence.name, divergence.detail), divergence)
+    divergences = list(deduped.values())
+
     return sorted(
         divergences,
         key=lambda d: (0 if "present in" in d.detail else 1, -len(d.present_in), d.name),

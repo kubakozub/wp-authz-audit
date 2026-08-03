@@ -73,7 +73,7 @@ def _snapshot(root: Path) -> dict[tuple[str, str], Snapshot]:
         except OSError:
             continue
 
-        for entry in scan_file(path, source):
+        for entry in scan_file(path, source, index.properties, index):
             body = entry.resolved.body(source) if entry.resolved else ""
             # Same cross-file guard resolution as the audit path, otherwise a
             # release that merely moved a check into a helper reads as a

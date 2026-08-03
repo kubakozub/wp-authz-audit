@@ -232,6 +232,89 @@ _PROPERTY_RE = re.compile(
 )
 
 
+_CLASS_DECL_RE = re.compile(
+    r"\b(?:abstract\s+|final\s+)*class\s+([A-Za-z_]\w*)"
+    r"(?:\s+extends\s+([A-Za-z_][\w\\]*))?",
+    re.I,
+)
+
+# `var $public = false;`, `public $public = true;`, `protected bool $x = true;`
+_BOOL_PROPERTY_RE = re.compile(
+    r"\b(?:var|public|protected|private)\s+(?:static\s+)?(?:\??\w+\s+)?"
+    r"\$([A-Za-z_]\w*)\s*=\s*(true|false)\s*;",
+    re.I,
+)
+
+
+@dataclass
+class ClassInfo:
+    name: str
+    parent: str | None
+    start: int
+    end: int
+    strings: dict[str, str]
+    booleans: dict[str, bool]
+    methods: dict[str, str]
+
+
+def classes(source: str, blanked: str | None = None) -> list[ClassInfo]:
+    """Classes with their parent, own property literals, and method bodies.
+
+    Inheritance matters more here than it looks. A base class registering a hook
+    behind `if ( $this->public )` is not a statement about the base class — it is
+    a statement about whichever subclass is instantiated. Reading the property
+    from the base and applying it to every descendant reports endpoints that do
+    not exist; resolving it per subclass is the difference between a list of
+    entry points and a list of guesses.
+    """
+    blanked = blank_noncode(source) if blanked is None else blanked
+    found: list[ClassInfo] = []
+
+    for match in _CLASS_DECL_RE.finditer(blanked):
+        brace = blanked.find("{", match.end())
+        if brace == -1:
+            continue
+        end = match_brace(blanked, brace)
+        body = source[brace:end]
+        blanked_body = blanked[brace:end]
+
+        strings = {
+            m.group(1): m.group(3)
+            for m in _PROPERTY_RE.finditer(body)
+            if m.group(3)
+        }
+        booleans = {
+            m.group(1): m.group(2).lower() == "true"
+            for m in _BOOL_PROPERTY_RE.finditer(blanked_body)
+        }
+        methods = {
+            function.name: function.body(source)
+            for function in functions(source, blanked)
+            if brace < function.start < end
+        }
+
+        found.append(
+            ClassInfo(
+                name=match.group(1),
+                parent=match.group(2).rsplit("\\", 1)[-1] if match.group(2) else None,
+                start=match.start(),
+                end=end,
+                strings=strings,
+                booleans=booleans,
+                methods=methods,
+            )
+        )
+
+    return found
+
+
+def enclosing_class(infos: list[ClassInfo], offset: int) -> ClassInfo | None:
+    for info in infos:
+        if info.start < offset < info.end:
+            return info
+    return None
+
+
 def property_literals(source: str, blanked: str | None = None) -> dict[str, set[str]]:
     """Class properties assigned a string literal, by property name.
 

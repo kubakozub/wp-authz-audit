@@ -50,7 +50,7 @@ def collect(root: Path, include_vendor: bool = False) -> tuple[list, list[Findin
             source = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        found = scan_file(path, source, index.properties)
+        found = scan_file(path, source, index.properties, index)
         if not found:
             continue
         scanned.append((path, source, found))

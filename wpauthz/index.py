@@ -33,7 +33,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .guards import CAPABILITY_FUNCTIONS, NONCE_FUNCTIONS
-from .php import Function, blank_noncode, calls, functions, literal, property_literals
+from .php import (
+    Function,
+    blank_noncode,
+    calls,
+    classes,
+    functions,
+    literal,
+    property_literals,
+)
 
 MAX_DEPTH = 3
 
@@ -67,6 +75,65 @@ class ProjectIndex:
     option_writes: dict[str, set[str]] = field(default_factory=dict)
     # Filled in after the entry-point map exists; see cli.collect().
     public_nonces: set[str] = field(default_factory=set)
+    # Class name -> ClassInfo, for resolving properties through `extends`.
+    class_table: dict = field(default_factory=dict)
+
+    def resolve_string(self, class_name: str, prop: str) -> str | None:
+        """Property value for a class, walking up the inheritance chain."""
+        seen: set[str] = set()
+        current = class_name
+        while current and current not in seen:
+            seen.add(current)
+            info = self.class_table.get(current)
+            if info is None:
+                return None
+            if prop in info.strings:
+                return info.strings[prop]
+            current = info.parent
+        return None
+
+    def resolve_bool(self, class_name: str, prop: str) -> bool | None:
+        seen: set[str] = set()
+        current = class_name
+        while current and current not in seen:
+            seen.add(current)
+            info = self.class_table.get(current)
+            if info is None:
+                return None
+            if prop in info.booleans:
+                return info.booleans[prop]
+            current = info.parent
+        return None
+
+    def descendants(self, class_name: str) -> list[str]:
+        """Every class that inherits from `class_name`, plus itself."""
+        out = [class_name]
+        frontier = {class_name}
+        while frontier:
+            children = {
+                name
+                for name, info in self.class_table.items()
+                if info.parent in frontier and name not in out
+            }
+            if not children:
+                break
+            out.extend(sorted(children))
+            frontier = children
+        return out
+
+    def ancestry_bodies(self, class_name: str) -> list[str]:
+        """Method bodies of a class and everything it inherits from."""
+        bodies: list[str] = []
+        seen: set[str] = set()
+        current = class_name
+        while current and current not in seen:
+            seen.add(current)
+            info = self.class_table.get(current)
+            if info is None:
+                break
+            bodies.extend(info.methods.values())
+            current = info.parent
+        return bodies
 
     def add_file(self, source: str, blanked: str | None = None) -> None:
         blanked = blank_noncode(source) if blanked is None else blanked
@@ -75,6 +142,9 @@ class ProjectIndex:
             self.bodies.setdefault(function.name, []).append(body)
             if _GUARDISH.search(blank_noncode(body)):
                 self.guard_names.add(function.name)
+
+        for info in classes(source, blanked):
+            self.class_table.setdefault(info.name, info)
 
         for name, values in property_literals(source, blanked).items():
             self.properties.setdefault(name, set()).update(values)

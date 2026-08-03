@@ -204,7 +204,15 @@ def analyse_file(
         # that only calls $this->get_results() still performs whatever that
         # method performs; missing it is a false negative, and a false negative
         # is the failure this tool exists to avoid.
-        sink_body = index.inline_callees(body) if (index and body) else body
+        # When the hook name came from a subclass property, the sinks that
+        # matter live in THAT subclass, not in the union of the tree. Scoping
+        # the search to the owning class and its ancestors is what stops one
+        # dispatcher line from claiming that six unrelated endpoints all leak
+        # the user list.
+        if index and entry.owner_class:
+            sink_body = "\n".join([body] + index.ancestry_bodies(entry.owner_class))
+        else:
+            sink_body = index.inline_callees(body) if (index and body) else body
         found_sinks = sinks(sink_body, body_line) if sink_body else []
         reads_request = request_controlled(sink_body) if sink_body else False
 
