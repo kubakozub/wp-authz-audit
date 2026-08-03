@@ -55,6 +55,13 @@ NONCE_FUNCTIONS = frozenset(
     }
 )
 
+# Which argument carries the nonce ACTION, per function.
+NONCE_ACTION_POSITION = {
+    "wp_verify_nonce": 1,
+    "check_admin_referer": 0,
+    "check_ajax_referer": 0,
+}
+
 # Frequently mistaken for authorization.
 PSEUDO_GUARDS = {
     "is_admin": (
@@ -251,7 +258,15 @@ def classify(body: str, base_line: int = 1) -> tuple[list[Guard], list[str]]:
 
     for name in sorted(CAPABILITY_FUNCTIONS | NONCE_FUNCTIONS):
         for call in calls(name, body, blanked):
-            capability = literal(call.args[0]) if call.args else None
+            # The nonce ACTION is not always the first argument:
+            # wp_verify_nonce($nonce, $action) puts it second, while
+            # check_ajax_referer($action, $query_arg) puts it first. Reading
+            # position 0 for both silently yielded None for wp_verify_nonce,
+            # which disabled every rule keyed on the nonce action.
+            position = NONCE_ACTION_POSITION.get(name, 0)
+            capability = (
+                literal(call.args[position]) if len(call.args) > position else None
+            )
             # is_super_admin takes a user id, not a capability
             if name == "is_super_admin":
                 capability = "super_admin"
@@ -287,12 +302,69 @@ def has_ownership_comparison(body: str) -> bool:
     return bool(_OWNERSHIP_COMPARISON.search(blank_noncode(body)))
 
 
+# What a sink actually touches, in the order a bug bounty program cares about.
+# The recurring killer in triage is not "is there a sink" but "does reaching it
+# change anything worth having". Ranking by impact rather than by presence is
+# what stops a cache flush and a credential write from sharing a severity.
+IMPACT_RANK = {"credentials": 0, "user_data": 1, "content": 2, "operational": 3}
+
+_IMPACT_BY_FUNCTION = {
+    "wp_set_auth_cookie": "credentials",
+    "wp_set_password": "credentials",
+    "wp_insert_user": "credentials",
+    "wp_create_user": "credentials",
+    "wp_update_user": "credentials",
+    "wp_delete_user": "credentials",
+    "update_user_meta": "user_data",
+    "delete_user_meta": "user_data",
+    "add_user_meta": "user_data",
+    "get_user_meta": "user_data",
+    "get_userdata": "user_data",
+    "get_user_by": "user_data",
+    "get_users": "user_data",
+    "WP_User_Query": "user_data",
+    "wp_list_users": "user_data",
+    "wp_mail": "user_data",
+    "wp_insert_post": "content",
+    "wp_update_post": "content",
+    "wp_delete_post": "content",
+    "wp_trash_post": "content",
+    "wp_publish_post": "content",
+    "update_post_meta": "content",
+    "delete_post_meta": "content",
+    "add_post_meta": "content",
+    "wp_update_comment": "content",
+    "wp_delete_comment": "content",
+    "wp_set_object_terms": "content",
+    "file_put_contents": "content",
+    "move_uploaded_file": "content",
+    "wp_handle_upload": "content",
+    "unlink": "content",
+    "wp_delete_file": "content",
+}
+
+# Option names whose content is worth stealing or forging, regardless of which
+# function writes them.
+_SENSITIVE_OPTION = re.compile(
+    r"key|token|secret|passw|licen[cs]e|api|auth|credential|smtp|salt|private",
+    re.I,
+)
+
+
+def impact_of(function: str, option: str | None = None) -> str:
+    """Impact class for a sink, refined by the option name when there is one."""
+    if option and _SENSITIVE_OPTION.search(option):
+        return "credentials"
+    return _IMPACT_BY_FUNCTION.get(function, "operational")
+
+
 @dataclass(frozen=True)
 class Sink:
     function: str
     line: int
     tainted_object_id: bool
-    kind: str  # "object_write" | "object_read" | "global_write"
+    kind: str  # "object_write" | "object_read" | "global_write" | ...
+    impact: str = "operational"
 
 
 _TAINT = re.compile(
@@ -309,7 +381,7 @@ def sinks(body: str, base_line: int = 1) -> list[Sink]:
     limits section. Shallow and honest beats deep and wrong here, because a
     false "safe" is the failure that matters.
     """
-    from .php import blank_noncode, calls
+    from .php import blank_noncode, calls, literal
 
     blanked = blank_noncode(body)
     found: list[Sink] = []
@@ -317,33 +389,34 @@ def sinks(body: str, base_line: int = 1) -> list[Sink]:
     for name, position in OBJECT_WRITE_SINKS.items():
         for call in calls(name, body, blanked):
             argument = call.args[position - 1] if len(call.args) >= position else ""
-            found.append(
-                Sink(name, base_line + call.line - 1, bool(_TAINT.search(argument)), "object_write")
-            )
+            found.append(Sink(name, base_line + call.line - 1,
+                              bool(_TAINT.search(argument)), "object_write",
+                              impact_of(name)))
 
     for name, position in OBJECT_READ_SINKS.items():
         for call in calls(name, body, blanked):
             argument = call.args[position - 1] if len(call.args) >= position else ""
-            found.append(
-                Sink(name, base_line + call.line - 1, bool(_TAINT.search(argument)), "object_read")
-            )
+            found.append(Sink(name, base_line + call.line - 1,
+                              bool(_TAINT.search(argument)), "object_read",
+                              impact_of(name)))
 
     for name in sorted(GLOBAL_WRITE_SINKS):
         for call in calls(name, body, blanked):
-            found.append(Sink(name, base_line + call.line - 1, False, "global_write"))
+            option = literal(call.args[0]) if call.args else None
+            found.append(Sink(name, base_line + call.line - 1, False, "global_write",
+                              impact_of(name, option)))
 
     for name in sorted(TAINT_DEPENDENT_SINKS):
         for call in calls(name, body, blanked):
             if any(_TAINT.search(argument) for argument in call.args):
-                found.append(
-                    Sink(name, base_line + call.line - 1, True, "tainted_dispatch")
-                )
+                found.append(Sink(name, base_line + call.line - 1, True,
+                                  "tainted_dispatch", "credentials"))
 
     for name in sorted(IDENTITY_SINKS):
         # `new WP_User_Query(...)` is a constructor, not a bare call.
         pattern = re.compile(rf"(?:new\s+)?(?<![\w$>]){re.escape(name)}\s*\(", re.I)
         for match in pattern.finditer(blanked):
             line = base_line + blanked.count("\n", 0, match.start())
-            found.append(Sink(name, line, False, "identity_read"))
+            found.append(Sink(name, line, False, "identity_read", "user_data"))
 
     return found

@@ -75,7 +75,8 @@ _HOOK_ARITY = {
     "ajax_nopriv": 0,
     "admin_post": 0,
     "admin_post_nopriv": 0,
-    "lifecycle": 0,
+    "dispatch": 0,
+    "bootstrap": 0,
     "rest": 1,
     "shortcode": 3,
     "meta": 4,
@@ -116,6 +117,7 @@ class Finding:
             "line": self.entry.line,
             "sink": self.sink.function if self.sink else None,
             "sink_line": self.sink.line if self.sink else None,
+            "impact": self.sink.impact if self.sink else None,
             "guards": [
                 {"function": g.function, "capability": g.capability, "line": g.line}
                 for g in self.guards
@@ -385,14 +387,32 @@ def _judge(
         # nonce is only ever minted behind a role gate: nobody below that role
         # is issued one, and a nonce cannot be forged for your own session.
         gated_to = None
+        public_nonce = None
         if index is not None and nonce_guards and not capability_guards:
             action = next(
                 (g.capability for g in nonce_guards if g.capability), None
             )
             if action:
-                gated_to = index.nonce_audience(action)
+                # Check the permissive direction first: a nonce an anonymous
+                # caller can fetch is not a barrier at all, so it outranks any
+                # role-gating conclusion.
+                if action in getattr(index, "public_nonces", set()):
+                    public_nonce = action
+                else:
+                    gated_to = index.nonce_audience(action)
 
-        if gated_to:
+        if public_nonce:
+            add("high", "CWE-862",
+                "Nonce-only handler whose nonce is handed out by a public endpoint",
+                [f"{entry.hook} has no capability check",
+                 f"wp_create_nonce('{public_nonce}') is reachable from an unauthenticated "
+                 "endpoint, so an anonymous caller can fetch a valid token and replay it",
+                 "effective reach is unauthenticated, not subscriber"]
+                + ([f"state-changing call: {writes[0].function}()"] if writes else [])
+                + ([f"discloses via {identity_reads[0].function}"] if identity_reads else []),
+                writes[0] if writes else (identity_reads[0] if identity_reads else None),
+                "unauth")
+        elif gated_to:
             add("info", "CWE-862",
                 "Nonce-only handler, but the nonce is only issued to "
                 f"{gated_to}s",
@@ -433,23 +453,44 @@ def _judge(
                      f"write: {tainted_writes[0].function}() on a request-controlled id"],
                     tainted_writes[0])
 
-    elif entry.kind == "lifecycle":
+    elif entry.kind == "dispatch":
+        # admin_init only. It genuinely runs inside admin-ajax.php and
+        # admin-post.php ahead of the login branch, so a handler here answers
+        # anonymous requests.
         if writes and not capability_guards:
             add("high", "CWE-862",
                 f"{entry.hook} handler acts on request data with no capability check",
-                [f"{entry.hook} runs before any authentication branch",
+                [f"{entry.hook} fires on admin-ajax.php and admin-post.php before "
+                 "the is_user_logged_in() branch",
                  f"state-changing call: {writes[0].function}()"],
                 writes[0], "unauth")
         elif flag_writes and not capability_guards:
             add("info", "CWE-862",
                 f"{entry.hook} handler writes a flag option",
-                [f"{entry.hook} runs before any authentication branch",
-                 f"{flag_writes[0].function}() targets an option only ever written with "
+                [f"{flag_writes[0].function}() targets an option only ever written with "
                  "a boolean — a one-shot flag, not a settings write"],
                 flag_writes[0], "unauth")
         elif reads_request and not capability_guards:
             add("low", "CWE-862", f"{entry.hook} handler reads request data unguarded",
-                [f"{entry.hook} runs before any authentication branch"], None, "unauth")
+                [f"{entry.hook} runs before the login branch"], None, "unauth")
+
+    elif entry.kind == "bootstrap":
+        # init, plugins_loaded, after_setup_theme and friends fire on every
+        # request as part of loading the plugin. "Runs before any authentication
+        # branch" is true of them and says nothing: it is equally true of every
+        # plugin's constructor. Only a handler that BOTH reads request data and
+        # acts on it is worth a look, and even then it is not a dispatch point.
+        if reads_request and writes and not capability_guards:
+            add("medium", "CWE-862",
+                f"{entry.hook} handler acts on request data with no capability check",
+                [f"{entry.hook} is a plugin bootstrap hook, not a request dispatcher — "
+                 "confirm the handler is actually reachable with attacker-controlled input",
+                 f"state-changing call: {writes[0].function}()"],
+                writes[0], "unauth")
+        elif reads_request and not capability_guards:
+            add("info", "CWE-862", f"{entry.hook} handler reads request data unguarded",
+                [f"{entry.hook} is a plugin bootstrap hook; every plugin runs code here"],
+                None, "unauth")
 
     elif entry.kind == "meta":
         raw = (entry.permission_callback or "").strip("'\" ")

@@ -98,14 +98,42 @@ between releases reports only four things:
 Everything else is silence, and the silence is the point. New vulnerabilities
 live in new code, so this is where to look first on every release.
 
+## Siblings as a specification
+
+Vendors ship families: a free and a pro edition, a fork, four products on one
+shared framework. The same function appears in all of them because it started as
+the same code. When one sibling checks something the others do not, that
+asymmetry is worth more than any absolute judgement about a single plugin.
+
+```console
+$ wp-authz-audit compare wp-mail-smtp insert-headers-and-footers
+generate_url()
+    capability check install_plugins() present in 1/2 siblings
+    missing in: wp-mail-smtp@4.9.0
+      wp-mail-smtp@4.9.0: src/Connect.php:76
+```
+
+With three or more siblings only a majority-present check counts, so one
+product's local feature is not mistaken for a gap in the other three. With
+exactly two there is no majority and every difference is shown.
+
+This is not proof of anything. It is a way to spend ten seconds finding the
+question instead of an afternoon reading four plugins to arrive at it.
+
 ## Commands
 
 ```bash
-wp-authz-audit map   <slug|path>          # every entry point (triage view)
-wp-authz-audit audit <slug|path>          # ranked findings
-wp-authz-audit diff  <slug>               # guard-set regression, previous -> latest
+wp-authz-audit map     <slug|path>        # every entry point (triage view)
+wp-authz-audit audit   <slug|path>        # ranked findings
+wp-authz-audit diff    <slug>             # guard-set regression, previous -> latest
+wp-authz-audit compare <A> <B> [C ...]    # guard asymmetry between sibling plugins
 wp-authz-audit watch --count 30           # recently updated plugins, ranked by findings
 ```
+
+`audit --bar unauth-impact` applies a submission bar in the tool rather than in
+your discipline: unauthenticated reach AND a sink that touches credentials, user
+data, or content. Everything mid-privilege and every write to a cache stamp or a
+one-shot flag is dropped before you read it.
 
 A target is a local directory, a wordpress.org slug, or `slug@version`. Releases
 are cached under `~/.cache/wp-authz-audit`, so re-runs are offline and
@@ -156,6 +184,23 @@ handler raises `ArgumentCountError` instead of doing anything.
 **An option only ever written with a boolean is a flag, not a setting.**
 Deleting a one-shot activation marker is not the same as writing a licence key,
 and ranking them together is how a scanner gets muted.
+
+**A bootstrap hook is not a dispatch point.** `admin_init` is special because
+admin-ajax.php and admin-post.php fire it before their login branch. Treating
+`init`, `plugins_loaded` and `after_setup_theme` the same way produced 251 of 435
+high-severity findings across 60 popular plugins — every one of them a plugin
+loading itself. "Runs before any authentication branch" is true of every plugin's
+constructor and tells a reviewer nothing.
+
+**A nonce an anonymous caller can fetch is not a barrier.** The mirror of the
+role-gating rule. Plugins ship public token vendors on purpose, because public
+forms need them; a handler guarded only by a nonce that a `nopriv` endpoint hands
+out is unauthenticated in practice.
+
+**Rank by what the sink touches, not by whether a sink exists.** Credentials
+over user data over content over cache stamps and flags. The recurring killer in
+triage is not "is there a sink" but "does reaching it change anything worth
+having".
 
 **Dispatch primitives are only sinks when what reaches them is tainted.**
 Reporting `call_user_func()` unconditionally produces the evidence line

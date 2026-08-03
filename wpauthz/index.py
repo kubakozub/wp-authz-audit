@@ -38,6 +38,7 @@ from .php import Function, blank_noncode, calls, functions, literal, property_li
 MAX_DEPTH = 3
 
 _CALL_NAME = re.compile(r"(?<![\w$])([A-Za-z_]\w*)\s*\(")
+_NONCE_MINT = re.compile(r"wp_create_nonce\s*\(\s*['\"]([^'\"]+)['\"]")
 
 # A helper only counts as a guard source if it plausibly performs a check.
 # Nonce functions are included even though a nonce is NOT authorization: if a
@@ -64,6 +65,8 @@ class ProjectIndex:
     guard_names: set[str] = field(default_factory=set)
     properties: dict[str, set[str]] = field(default_factory=dict)
     option_writes: dict[str, set[str]] = field(default_factory=dict)
+    # Filled in after the entry-point map exists; see cli.collect().
+    public_nonces: set[str] = field(default_factory=set)
 
     def add_file(self, source: str, blanked: str | None = None) -> None:
         blanked = blank_noncode(source) if blanked is None else blanked
@@ -127,6 +130,23 @@ class ProjectIndex:
                 return None  # one ungated emitter is enough to hand nonces out
             gates.add(gate)
         return "admin" if "administrator" in gates or "admin" in gates else None
+
+    def public_nonce_actions(self, unauth_bodies: list[str]) -> set[str]:
+        """Nonce actions any anonymous caller can obtain.
+
+        The mirror image of `nonce_audience`. If a nopriv endpoint hands out
+        `wp_create_nonce('x')`, then every handler guarded only by a nonce for
+        'x' is effectively unauthenticated: the attacker fetches a token from
+        the public endpoint and replays it. Plugins ship these token vendors
+        deliberately — public forms need them — which is what makes the pattern
+        both common and easy to miss.
+        """
+        actions: set[str] = set()
+        for body in unauth_bodies:
+            expanded = self.inline_callees(body, depth=2)
+            for match in _NONCE_MINT.finditer(expanded):
+                actions.add(match.group(1))
+        return actions
 
     def option_is_flag_only(self, option: str) -> bool:
         """True when every recorded write to this option is a boolean literal."""

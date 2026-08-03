@@ -88,7 +88,7 @@ class TestPhpModel(unittest.TestCase):
 class TestEntryPointDiscovery(unittest.TestCase):
     def test_finds_every_entry_point_kind(self):
         kinds = {entry.kind for entry in entries_for("vulnerable.php")}
-        for expected in ("ajax_nopriv", "ajax", "lifecycle", "rest", "meta"):
+        for expected in ("ajax_nopriv", "ajax", "dispatch", "rest", "meta"):
             self.assertIn(expected, kinds, f"missed entry point kind: {expected}")
 
     def test_admin_init_is_treated_as_unauthenticated(self):
@@ -323,6 +323,107 @@ class TestFieldReportRules(unittest.TestCase):
             "reported subscriber reach for an action whose nonce is only ever "
             "issued to administrators",
         )
+
+
+class TestBootstrapPrecision(unittest.TestCase):
+    """Measured regression: bootstrap hooks are not dispatch points.
+
+    Treating every early hook like admin_init produced 251 of 435 high-severity
+    findings across 60 popular plugins — all of them plugins loading themselves.
+    'Runs before any authentication branch' is true of `init -> initHooks` and
+    tells a reviewer nothing.
+    """
+
+    def test_bootstrap_hooks_are_a_separate_kind(self):
+        entries = entries_for("bootstrap_noise.php")
+        kinds = {e.hook: e.kind for e in entries}
+        self.assertEqual(kinds.get("init"), "bootstrap")
+        self.assertEqual(kinds.get("plugins_loaded"), "bootstrap")
+
+    def test_bootstrap_handler_never_ranks_high(self):
+        findings = findings_for("bootstrap_noise.php", with_index=True)
+        high = [f for f in findings if f.severity == "high"]
+        self.assertEqual(
+            [], high,
+            "a plugin bootstrapping itself ranked high: "
+            + " | ".join(f"{f.entry.hook}: {f.title}" for f in high),
+        )
+
+    def test_admin_init_still_ranks_high(self):
+        findings = findings_for("vulnerable.php", with_index=True)
+        match = [f for f in findings if f.entry.hook == "admin_init"]
+        self.assertTrue(match, "the admin_init rule was lost in the split")
+        self.assertEqual(match[0].severity, "high")
+
+
+class TestPublicNonce(unittest.TestCase):
+    """A nonce an anonymous caller can fetch is not a barrier."""
+
+    def test_nonce_vendor_makes_a_handler_unauthenticated(self):
+        path = FIXTURES / "public_nonce_vendor.php"
+        source = path.read_text(encoding="utf-8")
+        index = build_index(FIXTURES)
+        entries = scan_file(path, source, index.properties)
+        index.public_nonces = index.public_nonce_actions(
+            [e.resolved.body(source) for e in entries if e.reach == 0 and e.resolved]
+        )
+        findings = rank(analyse_file(path, source, entries, index))
+        match = [f for f in findings if f.entry.hook == "wp_ajax_demo_vendor_save"]
+        self.assertTrue(match, "no finding for the handler unlocked by the vendor")
+        self.assertEqual(match[0].tier, "unauth")
+        self.assertEqual(match[0].severity, "high")
+
+    def test_the_vendor_action_is_collected(self):
+        index = build_index(FIXTURES)
+        actions = index.public_nonce_actions(
+            ["return wp_send_json_success( wp_create_nonce( 'demo_vendor' ) );"]
+        )
+        self.assertIn("demo_vendor", actions)
+
+
+class TestImpactTaxonomy(unittest.TestCase):
+    def test_credential_option_outranks_a_cache_flush(self):
+        from wpauthz.guards import impact_of
+
+        self.assertEqual(impact_of("update_option", "demo_api_key"), "credentials")
+        self.assertEqual(impact_of("update_option", "demo_cache_stamp"), "operational")
+        self.assertEqual(impact_of("wp_set_auth_cookie"), "credentials")
+        self.assertEqual(impact_of("WP_User_Query"), "user_data")
+        self.assertEqual(impact_of("wp_update_post"), "content")
+
+
+class TestTwinComparison(unittest.TestCase):
+    """Siblings act as each other's specification.
+
+    Vendors ship families built on shared code. When the same function checks
+    something in one product and not in another, that asymmetry is a stronger
+    signal than any absolute judgement about a single plugin.
+    """
+
+    def setUp(self):
+        from wpauthz.compare import compare
+
+        twins = Path(__file__).parent / "twins"
+        self.divergences = compare([("free", twins / "free"), ("pro", twins / "pro")])
+
+    def test_missing_capability_check_is_reported(self):
+        match = [d for d in self.divergences if d.name == "generate_url"]
+        self.assertTrue(match, "identical function names with different guards not compared")
+        self.assertTrue(
+            any("current_user_can" in d.detail for d in match),
+            f"capability asymmetry missed; got: {[d.detail for d in match]}",
+        )
+
+    def test_the_weaker_sibling_is_named(self):
+        match = [d for d in self.divergences
+                 if d.name == "generate_url" and "current_user_can" in d.detail][0]
+        self.assertEqual(match.missing_in, ["free"])
+        self.assertEqual(match.present_in, ["pro"])
+
+    def test_location_is_reported_for_the_weaker_sibling(self):
+        match = [d for d in self.divergences if d.name == "generate_url"][0]
+        self.assertIn("free", match.facts)
+        self.assertEqual(match.facts["free"].line, 4)
 
 
 class TestRanking(unittest.TestCase):

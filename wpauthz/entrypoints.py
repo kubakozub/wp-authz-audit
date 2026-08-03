@@ -51,7 +51,8 @@ REACH = {
     "unresolved": 9,
     "ajax_nopriv": 0,
     "admin_post_nopriv": 0,
-    "lifecycle": 0,
+    "dispatch": 0,
+    "bootstrap": 1,
     "rest": 0,
     "meta": 0,
     "shortcode": 1,
@@ -59,16 +60,24 @@ REACH = {
     "admin_post": 1,
 }
 
-# Hooks that run before, or independently of, any authentication branch.
-# admin_init is here deliberately: admin-ajax.php and admin-post.php both fire
-# it ahead of their is_user_logged_in() check.
-LIFECYCLE_HOOKS = frozenset(
+# Hooks that fire inside a request-DISPATCHING context before the login branch.
+# admin-ajax.php and admin-post.php both call do_action('admin_init') ahead of
+# their is_user_logged_in() check, so a handler here genuinely answers anonymous
+# requests.
+DISPATCH_HOOKS = frozenset({"admin_init"})
+
+# Hooks that fire on essentially every request as part of loading the plugin.
+# They are technically pre-authentication too, but so is every plugin's
+# constructor: "runs before any authentication branch" is true of `init ->
+# initHooks` and tells you nothing. Measured on 60 popular plugins, treating
+# these like admin_init produced 251 of 435 high-severity findings, all of them
+# bootstraps. They are tracked, and reported only when they act on request data.
+BOOTSTRAP_HOOKS = frozenset(
     {
         "plugins_loaded",
         "setup_theme",
         "after_setup_theme",
         "init",
-        "admin_init",
         "wp_loaded",
         "parse_request",
         "send_headers",
@@ -77,6 +86,8 @@ LIFECYCLE_HOOKS = frozenset(
         "login_init",
     }
 )
+
+LIFECYCLE_HOOKS = DISPATCH_HOOKS | BOOTSTRAP_HOOKS
 
 _HOOK_PREFIXES = (
     ("wp_ajax_nopriv_", "ajax_nopriv"),
@@ -249,14 +260,14 @@ def scan_file(
         elif hook in LIFECYCLE_HOOKS:
             entry = resolve(
                 EntryPoint(
-                    kind="lifecycle",
+                    kind="dispatch" if hook in DISPATCH_HOOKS else "bootstrap",
                     hook=hook,
                     callback=callback_name(call.args[1]),
                     file=path,
                     line=call.line,
                 )
             )
-            if hook == "admin_init":
+            if hook in DISPATCH_HOOKS:
                 entry.notes.append(
                     "admin_init also fires on admin-ajax.php and admin-post.php "
                     "before the login branch"

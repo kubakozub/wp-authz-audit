@@ -1,10 +1,12 @@
 """Command line interface.
 
-Three modes, in order of how much time each saves:
+Five modes, in order of how much time each saves:
 
   map     enumerate every entry point in a plugin directory — the triage view
   audit   rank findings for one plugin (local directory, or slug[@version])
   diff    guard-set regression between two releases of the same plugin
+  compare guard asymmetry between sibling plugins (one vendor's family)
+  watch   bulk triage of recently updated plugins, ranked
 
 `diff` is the one that scales. Reviewing changed LINES produces noise: refactors,
 i18n, asset churn. Comparing the entry-point GRAPH between releases produces a
@@ -22,6 +24,7 @@ from pathlib import Path
 
 from . import __version__
 from .analyze import Finding, analyse_file, rank
+from .compare import compare as compare_trees
 from .diff import guard_set_regression
 from .entrypoints import iter_php, scan_file
 from .fetch import FetchError, info, plugin_root, recently_updated, release
@@ -38,18 +41,35 @@ def collect(root: Path, include_vendor: bool = False) -> tuple[list, list[Findin
     # another file is still recognised as a guard.
     index = build_index(root, include_vendor)
 
-    entries, findings = [], []
+    # Pass 1: find every entry point. Project-wide property literals let a hook
+    # registered as "wp_ajax_nopriv_{$this->action}" resolve to its real name.
+    scanned: list[tuple[Path, str, list]] = []
+    entries = []
     for path in iter_php(root, include_vendor):
         try:
             source = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        # Project-wide property literals let a hook registered as
-        # "wp_ajax_nopriv_{$this->action}" resolve to its real name.
         found = scan_file(path, source, index.properties)
         if not found:
             continue
+        scanned.append((path, source, found))
         entries.extend(found)
+
+    # Which nonces can an anonymous caller simply fetch? Answering this needs
+    # the whole entry-point map, so it cannot happen during pass 1: a handler in
+    # file A may be unlocked by a public token vendor in file B.
+    unauth_bodies = [
+        entry.resolved.body(source)
+        for path, source, found in scanned
+        for entry in found
+        if entry.reach == 0 and entry.resolved
+    ]
+    index.public_nonces = index.public_nonce_actions(unauth_bodies)
+
+    # Pass 2: judge.
+    findings = []
+    for path, source, found in scanned:
         findings.extend(analyse_file(path, source, found, index))
     return entries, rank(findings)
 
@@ -123,6 +143,20 @@ def command_audit(args: argparse.Namespace) -> int:
     if args.unauth_only:
         findings = [f for f in findings if f.tier == "unauth"]
 
+    if getattr(args, "bar", None) == "unauth-impact":
+        # The submission bar, enforced by the tool instead of by discipline:
+        # unauthenticated reach AND a sink that touches something worth having.
+        # Derived from real programme rejections — mid-privilege findings and
+        # bare information disclosure were both refused.
+        before = len(findings)
+        findings = [
+            f for f in findings
+            if f.tier == "unauth"
+            and f.sink is not None
+            and f.sink.impact in ("credentials", "user_data", "content")
+        ]
+        print(f"# --bar unauth-impact: {before} -> {len(findings)} finding(s)\n")
+
     if args.json:
         print(json.dumps(
             {"target": label, "entry_points": len(entries),
@@ -188,6 +222,51 @@ def command_diff(args: argparse.Namespace) -> int:
             print(f"      - {line}")
         print()
     print(f"{len(regressions)} regression(s) to review")
+    return 1
+
+
+def command_compare(args: argparse.Namespace) -> int:
+    """Guard asymmetry between sibling plugins."""
+    trees = []
+    for target in args.targets:
+        root, label = resolve_target(target, args.cache)
+        trees.append((label, root))
+
+    minimum = args.min_shared or (len(trees) if len(trees) < 3 else len(trees) - 1)
+    divergences = compare_trees(trees, min_shared=minimum)
+
+    if args.json:
+        print(json.dumps(
+            {
+                "plugins": [label for label, _ in trees],
+                "min_shared": minimum,
+                "divergences": [d.as_dict() for d in divergences],
+            },
+            indent=2,
+        ))
+        return 1 if divergences else 0
+
+    print(f"# comparing {', '.join(label for label, _ in trees)}")
+    print(f"# a check present in most siblings and missing in one is the signal\n")
+
+    if not divergences:
+        print("No guard asymmetry between these plugins.")
+        return 0
+
+    for item in divergences[: args.limit]:
+        print(f"{item.name}()")
+        print(f"    {item.detail}")
+        print(f"    missing in: {', '.join(item.missing_in)}")
+        for plugin in item.missing_in:
+            fact = item.facts.get(plugin)
+            if fact:
+                print(f"      {plugin}: {fact.file}:{fact.line}")
+        print()
+
+    shown = min(len(divergences), args.limit)
+    if shown < len(divergences):
+        print(f"showing {shown} of {len(divergences)}; raise --limit for the rest")
+    print(f"{len(divergences)} divergence(s) to review")
     return 1
 
 
@@ -274,23 +353,40 @@ def command_watch(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    # Shared options live on a parent parser so they work in either position:
-    # `wp-authz-audit --json audit x` and `wp-authz-audit audit x --json` both
-    # parse. Putting them only at the top level is a wart people trip over.
+    # Shared options must work in either position. Putting the same options on
+    # the top level and on every subparser looks right and silently loses the
+    # top-level value: argparse applies subparser DEFAULTS after parsing the
+    # top level, so `--json audit x` set the flag and then had it reset to
+    # False, with no error. The subparser copies therefore use SUPPRESS, which
+    # sets the attribute only when the flag is actually given.
+    def shared(parser: argparse.ArgumentParser, suppress: bool) -> None:
+        default = argparse.SUPPRESS if suppress else None
+        parser.add_argument(
+            "--cache", type=Path,
+            default=argparse.SUPPRESS if suppress else DEFAULT_CACHE,
+            help=f"download cache (default: {DEFAULT_CACHE})")
+        parser.add_argument(
+            "--json", action="store_true",
+            default=argparse.SUPPRESS if suppress else False,
+            help="machine-readable output")
+        parser.add_argument(
+            "--no-colour", "--no-color", dest="colour", action="store_false",
+            default=argparse.SUPPRESS if suppress else True,
+            help="disable ANSI colour")
+        parser.add_argument(
+            "--include-vendor", action="store_true",
+            default=argparse.SUPPRESS if suppress else False,
+            help="also scan vendor/ and node_modules/")
+        del default
+
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--cache", type=Path, default=DEFAULT_CACHE,
-                        help=f"download cache (default: {DEFAULT_CACHE})")
-    common.add_argument("--json", action="store_true", help="machine-readable output")
-    common.add_argument("--no-colour", "--no-color", dest="colour", action="store_false",
-                        help="disable ANSI colour")
-    common.add_argument("--include-vendor", action="store_true",
-                        help="also scan vendor/ and node_modules/")
+    shared(common, suppress=True)
 
     parser = argparse.ArgumentParser(
         prog="wp-authz-audit",
-        parents=[common],
         description="Rank WordPress plugin entry points by missing authorization.",
     )
+    shared(parser, suppress=False)
     parser.add_argument("--version", action="version", version=__version__)
 
     sub = parser.add_subparsers(dest="command", required=True)
@@ -302,6 +398,9 @@ def build_parser() -> argparse.ArgumentParser:
                        default="medium")
     audit.add_argument("--unauth-only", action="store_true",
                        help="only findings exploitable with no credentials")
+    audit.add_argument("--bar", choices=["unauth-impact"],
+                       help="apply a submission bar: unauth-impact keeps only "
+                            "unauthenticated findings whose sink has real impact")
     audit.set_defaults(func=command_audit)
 
     mapper = sub.add_parser("map", parents=[common],
@@ -315,6 +414,17 @@ def build_parser() -> argparse.ArgumentParser:
     diff.add_argument("--from", dest="old", help="older version (default: previous release)")
     diff.add_argument("--to", dest="new", help="newer version (default: latest)")
     diff.set_defaults(func=command_diff)
+
+    compare_parser = sub.add_parser(
+        "compare", parents=[common],
+        help="guard asymmetry between sibling plugins (free vs pro, one vendor's family)")
+    compare_parser.add_argument("targets", nargs="+",
+                                help="two or more paths, slugs, or slug@version")
+    compare_parser.add_argument("--min-shared", type=int,
+                                help="how many siblings must define a name (default: "
+                                     "all for 2, all-but-one for 3+)")
+    compare_parser.add_argument("--limit", type=int, default=40)
+    compare_parser.set_defaults(func=command_compare)
 
     watch = sub.add_parser("watch", parents=[common],
                            help="audit recently updated plugins, ranked")
