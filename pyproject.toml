@@ -1,0 +1,30 @@
+[project]
+name = "wp-authz-audit"
+version = "0.1.0"
+description = "Rank WordPress plugin entry points by missing authorization"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "Jakub Kozub" }]
+keywords = ["wordpress", "security", "appsec", "bug-bounty", "static-analysis"]
+classifiers = [
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Security",
+]
+dependencies = []
+
+[project.scripts]
+wp-authz-audit = "wpauthz.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/kubakozub/wp-authz-audit"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["wpauthz"]

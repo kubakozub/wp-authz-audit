@@ -1,0 +1,254 @@
+"""Minimal PHP source model: enough structure to follow a hook to its callback.
+
+This is deliberately NOT a PHP parser. A real parser (php-parser, tree-sitter)
+would be more accurate, but pulling a PHP toolchain into an offline Python tool
+costs more than it returns for the one question this asks: "which function runs
+when this hook fires, and does that function check anything before acting?"
+
+What it does give you, and why each piece is load-bearing:
+
+  * `blank_noncode()` replaces the contents of comments and string literals with
+    filler of the same length. Every offset stays valid, but a match can no
+    longer land inside a docblock or a string. Without this step, a plugin that
+    merely mentions `current_user_can` in a comment reads as protected — and a
+    tool that says "protected" when it means "the words appear nearby" is worse
+    than no tool.
+  * `functions()` finds function and method definitions with their real body
+    extents by brace matching over the blanked source, so nested braces, braces
+    in strings, and `${...}` interpolation do not truncate a body.
+  * `calls()` finds call sites with balanced-paren argument extraction, so a
+    callback argument containing its own parentheses or commas survives intact.
+
+Known limits are in the module docstring of `authz.py` and in the README; they
+are part of the contract, not omissions.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from typing import Iterator
+
+_LINE_COMMENT = re.compile(r"//|#")
+_OPEN_BLOCK = "/*"
+
+
+def blank_noncode(source: str) -> str:
+    """Return source with comment and string CONTENTS replaced by spaces.
+
+    Length and every offset are preserved, so line numbers and slices computed
+    on the result apply unchanged to the original. Quotes and comment markers
+    themselves are kept, which keeps the result readable when debugging.
+    """
+    out = list(source)
+    i, n = 0, len(source)
+
+    while i < n:
+        ch = source[i]
+
+        # Block comment
+        if source.startswith(_OPEN_BLOCK, i):
+            end = source.find("*/", i + 2)
+            end = n if end == -1 else end + 2
+            for j in range(i + 2, min(end - 2, n)):
+                if out[j] != "\n":
+                    out[j] = " "
+            i = end
+            continue
+
+        # Line comment. '#[' opens a PHP 8 attribute, not a comment.
+        if ch == "/" and i + 1 < n and source[i + 1] == "/" or (
+            ch == "#" and not source.startswith("#[", i)
+        ):
+            end = source.find("\n", i)
+            end = n if end == -1 else end
+            for j in range(i, end):
+                out[j] = " "
+            i = end
+            continue
+
+        # Heredoc / nowdoc
+        if source.startswith("<<<", i):
+            match = re.match(r"<<<[ \t]*(['\"]?)([A-Za-z_]\w*)\1\r?\n", source[i:])
+            if match:
+                label = match.group(2)
+                body_start = i + match.end()
+                close = re.compile(rf"^[ \t]*{label}\b", re.M)
+                found = close.search(source, body_start)
+                end = found.start() if found else n
+                for j in range(body_start, min(end, n)):
+                    if out[j] != "\n":
+                        out[j] = " "
+                i = end if found else n
+                continue
+
+        # Quoted string
+        if ch in "'\"":
+            quote = ch
+            j = i + 1
+            while j < n:
+                if source[j] == "\\":
+                    j += 2
+                    continue
+                if source[j] == quote:
+                    break
+                j += 1
+            for k in range(i + 1, min(j, n)):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = min(j + 1, n)
+            continue
+
+        i += 1
+
+    return "".join(out)
+
+
+def line_of(source: str, offset: int) -> int:
+    return source.count("\n", 0, offset) + 1
+
+
+def match_brace(blanked: str, open_index: int) -> int:
+    """Index just past the '}' matching the '{' at open_index (or len)."""
+    depth = 0
+    for i in range(open_index, len(blanked)):
+        if blanked[i] == "{":
+            depth += 1
+        elif blanked[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return len(blanked)
+
+
+def _match_paren(blanked: str, open_index: int) -> int:
+    depth = 0
+    for i in range(open_index, len(blanked)):
+        if blanked[i] == "(":
+            depth += 1
+        elif blanked[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def split_args(raw: str) -> list[str]:
+    """Split an argument list on top-level commas only."""
+    args, depth, current = [], 0, []
+    for ch in raw:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            args.append("".join(current).strip())
+            current = []
+            continue
+        current.append(ch)
+    tail = "".join(current).strip()
+    if tail:
+        args.append(tail)
+    return args
+
+
+@dataclass(frozen=True)
+class Function:
+    name: str
+    qualified: str
+    start: int
+    body_start: int
+    body_end: int
+    line: int
+
+    def body(self, source: str) -> str:
+        return source[self.body_start : self.body_end]
+
+
+_FUNC_RE = re.compile(r"\bfunction\s+&?\s*([A-Za-z_]\w*)\s*\(", re.I)
+_CLASS_RE = re.compile(r"\b(?:class|trait)\s+([A-Za-z_]\w*)", re.I)
+
+
+def functions(source: str, blanked: str | None = None) -> list[Function]:
+    """Every named function/method with its true body extent."""
+    blanked = blank_noncode(source) if blanked is None else blanked
+
+    classes: list[tuple[int, int, str]] = []
+    for match in _CLASS_RE.finditer(blanked):
+        brace = blanked.find("{", match.end())
+        if brace == -1:
+            continue
+        classes.append((brace, match_brace(blanked, brace), match.group(1)))
+
+    found: list[Function] = []
+    for match in _FUNC_RE.finditer(blanked):
+        paren_close = _match_paren(blanked, match.end() - 1)
+        if paren_close == -1:
+            continue
+        brace = blanked.find("{", paren_close)
+        if brace == -1:
+            continue
+        # An abstract/interface method ends at ';' before any '{'
+        semi = blanked.find(";", paren_close)
+        if semi != -1 and semi < brace:
+            continue
+
+        name = match.group(1)
+        owner = next(
+            (cls for start, end, cls in classes if start < match.start() < end), None
+        )
+        found.append(
+            Function(
+                name=name,
+                qualified=f"{owner}::{name}" if owner else name,
+                start=match.start(),
+                body_start=brace,
+                body_end=match_brace(blanked, brace),
+                line=line_of(source, match.start()),
+            )
+        )
+    return found
+
+
+@dataclass(frozen=True)
+class Call:
+    name: str
+    args: list[str]
+    start: int
+    line: int
+
+
+def calls(name: str, source: str, blanked: str | None = None) -> Iterator[Call]:
+    """Call sites of `name`, with arguments taken from the ORIGINAL source.
+
+    Matching happens on the blanked copy so a call named inside a comment or a
+    string is never reported, but arguments are sliced from the real source so
+    string literals in them stay readable.
+    """
+    blanked = blank_noncode(source) if blanked is None else blanked
+    pattern = re.compile(rf"(?<![\w$>:]){re.escape(name)}\s*\(", re.I)
+
+    for match in pattern.finditer(blanked):
+        close = _match_paren(blanked, match.end() - 1)
+        if close == -1:
+            continue
+        yield Call(
+            name=name,
+            args=split_args(source[match.end() : close]),
+            start=match.start(),
+            line=line_of(source, match.start()),
+        )
+
+
+_STRING_LITERAL = re.compile(r"^\s*(['\"])(.*)\1\s*$", re.S)
+
+
+def literal(argument: str) -> str | None:
+    """The value of a single-quoted or double-quoted literal, else None."""
+    match = _STRING_LITERAL.match(argument)
+    if not match:
+        return None
+    value = match.group(2)
+    if "$" in value and match.group(1) == '"':
+        return None  # interpolated: not a constant we can trust
+    return value

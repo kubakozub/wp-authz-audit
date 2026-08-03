@@ -1,0 +1,3 @@
+# Keep line endings stable across Windows, WSL and CI.
+* text=auto eol=lf
+*.png binary
