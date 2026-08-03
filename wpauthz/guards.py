@@ -138,7 +138,32 @@ OBJECT_READ_SINKS = {
     "get_comment": 1,
 }
 
-# State-changing sinks that are dangerous regardless of any object id.
+# Reads that disclose data about OTHER people. Missing authorization on a read
+# is still CWE-862 — the tool used to rank only state-changing sinks, which left
+# a handler that merely returns the site's user list behind a nonce looking
+# identical to one that returns a list of post titles.
+DISCLOSURE_SINKS = frozenset(
+    {
+        "WP_User_Query",
+        "get_users",
+        "wp_list_users",
+        "get_user_by",
+        "get_userdata",
+        "get_user_meta",
+        "wp_get_current_user",
+        "get_comments",
+        "WP_Comment_Query",
+        "get_option",
+        "wp_load_alloptions",
+    }
+)
+
+# Reads that are only interesting when they expose other users' identities.
+IDENTITY_SINKS = frozenset(
+    {"WP_User_Query", "get_users", "wp_list_users", "get_user_by", "get_userdata"}
+)
+
+# Calls that change state no matter what is passed to them.
 GLOBAL_WRITE_SINKS = frozenset(
     {
         "update_option",
@@ -150,26 +175,38 @@ GLOBAL_WRITE_SINKS = frozenset(
         "wp_set_auth_cookie",
         "wp_insert_post",
         "wp_mail",
-        "wp_remote_get",
-        "wp_remote_post",
         "file_put_contents",
         "unlink",
         "move_uploaded_file",
         "wp_handle_upload",
         "wp_delete_file",
-        "eval",
-        "unserialize",
-        "extract",
+    }
+)
+
+# Dangerous only when what reaches them is attacker-controlled. Reporting these
+# unconditionally is how a scanner ends up saying "state-changing call:
+# call_user_func()" about a plugin's own internal dispatch — technically a call,
+# entirely useless as evidence, and it drowns the findings that matter.
+TAINT_DEPENDENT_SINKS = frozenset(
+    {
         "call_user_func",
         "call_user_func_array",
+        "unserialize",
+        "extract",
+        "eval",
+        "assert",
+        "create_function",
         "system",
         "exec",
         "shell_exec",
         "passthru",
         "proc_open",
         "popen",
-        "assert",
-        "create_function",
+        "wp_remote_get",
+        "wp_remote_post",
+        "file_get_contents",
+        "include",
+        "require",
     }
 )
 
@@ -294,5 +331,19 @@ def sinks(body: str, base_line: int = 1) -> list[Sink]:
     for name in sorted(GLOBAL_WRITE_SINKS):
         for call in calls(name, body, blanked):
             found.append(Sink(name, base_line + call.line - 1, False, "global_write"))
+
+    for name in sorted(TAINT_DEPENDENT_SINKS):
+        for call in calls(name, body, blanked):
+            if any(_TAINT.search(argument) for argument in call.args):
+                found.append(
+                    Sink(name, base_line + call.line - 1, True, "tainted_dispatch")
+                )
+
+    for name in sorted(IDENTITY_SINKS):
+        # `new WP_User_Query(...)` is a constructor, not a bare call.
+        pattern = re.compile(rf"(?:new\s+)?(?<![\w$>]){re.escape(name)}\s*\(", re.I)
+        for match in pattern.finditer(blanked):
+            line = base_line + blanked.count("\n", 0, match.start())
+            found.append(Sink(name, line, False, "identity_read"))
 
     return found

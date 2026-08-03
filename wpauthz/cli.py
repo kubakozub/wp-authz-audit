@@ -44,7 +44,9 @@ def collect(root: Path, include_vendor: bool = False) -> tuple[list, list[Findin
             source = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        found = scan_file(path, source)
+        # Project-wide property literals let a hook registered as
+        # "wp_ajax_nopriv_{$this->action}" resolve to its real name.
+        found = scan_file(path, source, index.properties)
         if not found:
             continue
         entries.extend(found)
@@ -193,15 +195,25 @@ def command_watch(args: argparse.Namespace) -> int:
     """Audit the most recently updated plugins — the discovery worklist."""
     slugs = args.slugs or recently_updated(args.count, args.cache)
     ranked = []
+    below_threshold: list[tuple[str, int]] = []
+    errored: list[str] = []
+    scanned = 0
 
     for slug in slugs:
         try:
             meta = info(slug, args.cache)
             if meta.active_installs < args.min_installs:
+                # Never drop a plugin silently. A tool that quietly discards
+                # most of its input reads as "I checked 40 plugins" when it
+                # checked eight, and that is the kind of quiet lie that makes a
+                # clean run meaningless.
+                below_threshold.append((slug, meta.active_installs))
                 continue
             root = plugin_root(release(slug, meta.version, args.cache))
             _, findings = collect(root)
+            scanned += 1
         except FetchError as error:
+            errored.append(slug)
             print(f"skip {slug}: {error}", file=sys.stderr)
             continue
 
@@ -212,6 +224,34 @@ def command_watch(args: argparse.Namespace) -> int:
 
     ranked.sort(key=lambda row: (row[0], row[1], row[2].active_installs), reverse=True)
 
+    if args.json:
+        print(json.dumps(
+            {
+                "requested": len(slugs),
+                "scanned": scanned,
+                "skipped_below_installs": [
+                    {"slug": slug, "active_installs": installs}
+                    for slug, installs in below_threshold
+                ],
+                "skipped_errors": errored,
+                "min_installs": args.min_installs,
+                "plugins": [
+                    {
+                        "slug": meta.slug,
+                        "version": meta.version,
+                        "active_installs": meta.active_installs,
+                        "high": high_count,
+                        "unauth": unauth_count,
+                        "findings": [f.as_dict() for f in findings
+                                     if f.severity == "high"],
+                    }
+                    for unauth_count, high_count, meta, findings in ranked
+                ],
+            },
+            indent=2,
+        ))
+        return 0
+
     for unauth_count, high_count, meta, findings in ranked:
         print(f"{meta.slug}@{meta.version}  installs={meta.active_installs:,}  "
               f"high={high_count} unauth={unauth_count}")
@@ -221,7 +261,15 @@ def command_watch(args: argparse.Namespace) -> int:
                 print(f"      {finding.entry.hook} -> {finding.entry.callback}")
         print()
 
-    print(f"{len(ranked)} of {len(slugs)} plugin(s) have high-severity findings")
+    print(f"{len(slugs)} requested; {scanned} scanned; "
+          f"{len(below_threshold)} below --min-installs {args.min_installs}; "
+          f"{len(errored)} failed to fetch")
+    if below_threshold and args.verbose:
+        for slug, installs in below_threshold:
+            print(f"  below threshold: {slug} ({installs:,} installs)")
+    print(f"{len(ranked)} of {scanned} scanned plugin(s) have high-severity findings")
+    if scanned and not ranked:
+        print("Nothing scanned means nothing found — not that the plugins are clean.")
     return 0
 
 
@@ -274,6 +322,8 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument("--count", type=int, default=20)
     watch.add_argument("--min-installs", type=int, default=1000,
                        help="skip plugins below this install count")
+    watch.add_argument("--verbose", action="store_true",
+                       help="list every plugin skipped by the install threshold")
     watch.set_defaults(func=command_watch)
 
     return parser

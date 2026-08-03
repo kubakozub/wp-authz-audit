@@ -68,6 +68,19 @@ CAPABILITY_TIER = {
 SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2, "info": 3}
 
 # Meta keys whose name suggests writing them has a security consequence.
+# How many arguments each hook family actually passes to its callback.
+# admin-ajax.php and admin-post.php call do_action("...{$action}") with none.
+_HOOK_ARITY = {
+    "ajax": 0,
+    "ajax_nopriv": 0,
+    "admin_post": 0,
+    "admin_post_nopriv": 0,
+    "lifecycle": 0,
+    "rest": 1,
+    "shortcode": 3,
+    "meta": 4,
+}
+
 HIGH_VALUE_META = re.compile(
     r"cap|role|admin|key|token|secret|passw|price|paid|licen[cs]e|access|owner|"
     r"user_id|email|status|approve|verif",
@@ -157,7 +170,22 @@ def analyse_file(
     defined = {f.name: f for f in functions(source, blanked)}
 
     for entry in entries:
+        if entry.kind == "unresolved":
+            continue
+
         body, body_line = _body_for(entry, source)
+
+        # A callback that requires more arguments than its hook supplies cannot
+        # run at all — do_action("admin_post_{$action}") passes none, so a
+        # two-parameter handler raises ArgumentCountError rather than doing
+        # anything. If it also reads no request data, there is nothing an
+        # attacker drives, and reporting it is noise.
+        if (
+            entry.resolved
+            and entry.resolved.required_arity > _HOOK_ARITY.get(entry.kind, 1)
+            and not request_controlled(body)
+        ):
+            continue
 
         # A handler that delegates its checks to a helper inherits that helper's
         # guards. Same-file helpers are always followed; with a project index,
@@ -169,14 +197,62 @@ def analyse_file(
         if index is not None:
             combined = index.inline_guards(combined)
         guards, pseudo_notes = classify(combined, body_line)
-        found_sinks = sinks(body, body_line) if body else []
-        reads_request = request_controlled(body) if body else False
+
+        # Sinks follow delegation more aggressively than guards do. A handler
+        # that only calls $this->get_results() still performs whatever that
+        # method performs; missing it is a false negative, and a false negative
+        # is the failure this tool exists to avoid.
+        sink_body = index.inline_callees(body) if (index and body) else body
+        found_sinks = sinks(sink_body, body_line) if sink_body else []
+        reads_request = request_controlled(sink_body) if sink_body else False
 
         findings.extend(
-            _judge(entry, guards, pseudo_notes, found_sinks, reads_request, body)
+            _judge(entry, guards, pseudo_notes, found_sinks, reads_request, body, index)
         )
 
     return findings
+
+
+_OPTION_ARG = re.compile(r"^\s*['\"]([^'\"]+)['\"]")
+
+
+def _writes_worth_reporting(
+    body: str, found_sinks: list[Sink], index: "ProjectIndex | None"
+) -> tuple[list[Sink], list[Sink]]:
+    """Split state-changing sinks into meaningful ones and one-shot flags.
+
+    An option that is only ever written with a boolean is a flag: a marker that
+    onboarding ran, that a notice was dismissed, that a cache is stale. Writing
+    it changes nothing an attacker wants. Ranking it beside a licence key is how
+    a scanner teaches you to ignore it.
+    """
+    writes = [s for s in found_sinks
+              if s.kind in ("object_write", "global_write", "tainted_dispatch")]
+    if index is None:
+        return writes, []
+
+    from .php import blank_noncode, calls
+
+    blanked = blank_noncode(body)
+    flag_only: list[Sink] = []
+    meaningful: list[Sink] = []
+
+    for sink in writes:
+        if sink.function not in ("update_option", "delete_option", "add_option"):
+            meaningful.append(sink)
+            continue
+        option = None
+        for call in calls(sink.function, body, blanked):
+            match = _OPTION_ARG.match(call.args[0]) if call.args else None
+            if match:
+                option = match.group(1)
+                break
+        if option and index.option_is_flag_only(option):
+            flag_only.append(sink)
+        else:
+            meaningful.append(sink)
+
+    return meaningful, flag_only
 
 
 def _helper_guard_bodies(entry, defined, blanked, source) -> list[str]:
@@ -204,16 +280,22 @@ def _judge(
     found_sinks: list[Sink],
     reads_request: bool,
     body: str,
+    index: "ProjectIndex | None" = None,
 ) -> list[Finding]:
     capability_guards = [g for g in guards if g.is_capability]
     nonce_guards = [g for g in guards if g.is_nonce]
-    writes = [s for s in found_sinks if s.kind in ("object_write", "global_write")]
+    writes, flag_writes = _writes_worth_reporting(body, found_sinks, index)
     tainted_writes = [s for s in found_sinks if s.kind == "object_write" and s.tainted_object_id]
+    identity_reads = [s for s in found_sinks if s.kind == "identity_read"]
 
     tier = _tier_for_capabilities(capability_guards)
     findings: list[Finding] = []
 
     def add(severity, cwe, title, evidence, sink=None, at_tier=None):
+        # entry.notes carry provenance the reviewer needs — most importantly
+        # that a hook name was reconstructed from a property, which means the
+        # handler body may belong to a sibling class and the sink should be
+        # confirmed against the right one before believing the finding.
         findings.append(
             Finding(
                 severity=severity,
@@ -221,7 +303,7 @@ def _judge(
                 title=title,
                 tier=at_tier or tier or ("unauth" if entry.reach == 0 else "subscriber"),
                 entry=entry,
-                evidence=evidence + pseudo_notes,
+                evidence=evidence + pseudo_notes + list(entry.notes),
                 guards=guards,
                 sink=sink,
             )
@@ -276,12 +358,50 @@ def _judge(
                  "a nonce here is CSRF defence, not authorization" if nonce_guards else
                  "no guard of any kind in the handler"],
                 writes[0], "unauth")
+        elif identity_reads:
+            # Missing authorization on a READ is still CWE-862. This handler
+            # returns data about other people to an anonymous caller.
+            add("high", "CWE-862",
+                "Unauthenticated handler returns data about other users",
+                [f"{entry.hook} is reachable with no credentials",
+                 f"discloses via {identity_reads[0].function}",
+                 "a nonce here is CSRF defence, not authorization; check whether "
+                 "the nonce is even bound to this action" if nonce_guards else
+                 "no guard of any kind in the handler"],
+                identity_reads[0], "unauth")
         elif reads_request:
             add("medium", "CWE-862", "Unauthenticated handler reads request data",
                 [f"{entry.hook} is reachable with no credentials"], None, "unauth")
+        elif flag_writes:
+            add("info", "CWE-862",
+                "Unauthenticated handler writes a flag option",
+                [f"{entry.hook} is reachable with no credentials",
+                 f"{flag_writes[0].function}() targets an option only ever written "
+                 "with a boolean — confirm what it actually gates"],
+                flag_writes[0], "unauth")
 
     elif entry.kind in ("ajax", "admin_post"):
-        if not capability_guards and writes:
+        # A nonce-only handler is normally subscriber-reachable. Not when the
+        # nonce is only ever minted behind a role gate: nobody below that role
+        # is issued one, and a nonce cannot be forged for your own session.
+        gated_to = None
+        if index is not None and nonce_guards and not capability_guards:
+            action = next(
+                (g.capability for g in nonce_guards if g.capability), None
+            )
+            if action:
+                gated_to = index.nonce_audience(action)
+
+        if gated_to:
+            add("info", "CWE-862",
+                "Nonce-only handler, but the nonce is only issued to "
+                f"{gated_to}s",
+                [f"{entry.hook} has no capability check",
+                 f"every wp_create_nonce() for this action sits behind a {gated_to} gate, "
+                 "so lower roles are never issued one",
+                 "effective bar is therefore " + gated_to],
+                writes[0] if writes else None, gated_to)
+        elif not capability_guards and writes:
             add("high", "CWE-862",
                 "Handler reachable by any logged-in user performs a state-changing "
                 "operation with no capability check",
@@ -290,6 +410,14 @@ def _judge(
                  "only a nonce check is present — that is CSRF defence, not authorization"
                  if nonce_guards else "no capability check in the handler"],
                 writes[0], "subscriber")
+        elif not capability_guards and identity_reads:
+            add("high", "CWE-862",
+                "Handler reachable by any logged-in user returns data about other users",
+                [f"{entry.hook} is reachable by any authenticated user, including subscribers",
+                 f"discloses via {identity_reads[0].function}",
+                 "only a nonce check is present — that is CSRF defence, not authorization"
+                 if nonce_guards else "no capability check in the handler"],
+                identity_reads[0], "subscriber")
         elif capability_guards and tainted_writes:
             primitive = next(
                 (g.capability for g in capability_guards
@@ -306,12 +434,19 @@ def _judge(
                     tainted_writes[0])
 
     elif entry.kind == "lifecycle":
-        if reads_request and writes and not capability_guards:
+        if writes and not capability_guards:
             add("high", "CWE-862",
                 f"{entry.hook} handler acts on request data with no capability check",
                 [f"{entry.hook} runs before any authentication branch",
                  f"state-changing call: {writes[0].function}()"],
                 writes[0], "unauth")
+        elif flag_writes and not capability_guards:
+            add("info", "CWE-862",
+                f"{entry.hook} handler writes a flag option",
+                [f"{entry.hook} runs before any authentication branch",
+                 f"{flag_writes[0].function}() targets an option only ever written with "
+                 "a boolean — a one-shot flag, not a settings write"],
+                flag_writes[0], "unauth")
         elif reads_request and not capability_guards:
             add("low", "CWE-862", f"{entry.hook} handler reads request data unguarded",
                 [f"{entry.hook} runs before any authentication branch"], None, "unauth")

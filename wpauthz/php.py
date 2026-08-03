@@ -160,9 +160,23 @@ class Function:
     body_start: int
     body_end: int
     line: int
+    params: str = ""
 
     def body(self, source: str) -> str:
         return source[self.body_start : self.body_end]
+
+    @property
+    def required_arity(self) -> int:
+        """Parameters with no default and no variadic — what PHP demands."""
+        if not self.params.strip():
+            return 0
+        count = 0
+        for parameter in split_args(self.params):
+            if "=" in parameter or "..." in parameter:
+                continue
+            if "$" in parameter:
+                count += 1
+        return count
 
 
 _FUNC_RE = re.compile(r"\bfunction\s+&?\s*([A-Za-z_]\w*)\s*\(", re.I)
@@ -205,9 +219,40 @@ def functions(source: str, blanked: str | None = None) -> list[Function]:
                 body_start=brace,
                 body_end=match_brace(blanked, brace),
                 line=line_of(source, match.start()),
+                params=source[match.end() : paren_close],
             )
         )
     return found
+
+
+# `var $action = 'x';`, `public $action = 'x';`, `protected string $a = 'x';`
+_PROPERTY_RE = re.compile(
+    r"\b(?:var|public|protected|private)\s+(?:static\s+)?(?:\??\w+\s+)?"
+    r"\$([A-Za-z_]\w*)\s*=\s*(['\"])([^'\"]*)\2\s*;",
+)
+
+
+def property_literals(source: str, blanked: str | None = None) -> dict[str, set[str]]:
+    """Class properties assigned a string literal, by property name.
+
+    WordPress plugins routinely register hooks from a property rather than a
+    literal — `add_action( "wp_ajax_nopriv_{$this->action}", ... )` in a base
+    class, with each subclass setting `var $action = '...'`. The literal hook
+    name never appears in the source, so a purely literal scan is blind to the
+    entry point entirely. Collecting the property values makes those hooks
+    resolvable.
+    """
+    blanked = blank_noncode(source) if blanked is None else blanked
+    values: dict[str, set[str]] = {}
+    # Match on the original source: the values ARE string contents, which the
+    # blanked copy has erased. Guard against comments by checking the blanked
+    # copy still has code at that offset.
+    for match in _PROPERTY_RE.finditer(source):
+        if blanked[match.start() : match.start() + 3].isspace():
+            continue
+        if match.group(3):
+            values.setdefault(match.group(1), set()).add(match.group(3))
+    return values
 
 
 @dataclass(frozen=True)

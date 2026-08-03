@@ -35,11 +35,20 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .php import Call, Function, blank_noncode, calls, functions, literal
+from .php import (
+    Call,
+    Function,
+    blank_noncode,
+    calls,
+    functions,
+    literal,
+    property_literals,
+)
 
 # Reachability rank: how much attacker capability the entry point assumes.
 # 0 = none at all, higher = more prerequisites.
 REACH = {
+    "unresolved": 9,
     "ajax_nopriv": 0,
     "admin_post_nopriv": 0,
     "lifecycle": 0,
@@ -135,14 +144,48 @@ def _hook_kind(hook: str) -> tuple[str, str] | None:
     return None
 
 
-def scan_file(path: Path, source: str) -> list[EntryPoint]:
+# "wp_ajax_nopriv_{$this->action}" / "wp_ajax_{$action}" / "wp_ajax_" . $this->action
+_INTERPOLATED = re.compile(
+    r"^\s*[\"']"
+    r"(?P<prefix>[A-Za-z_][\w]*_)"
+    r"(?:\{\s*)?\$(?:this->)?(?P<prop>[A-Za-z_]\w*)"
+    r"|^\s*['\"](?P<prefix2>[A-Za-z_][\w]*_)['\"]\s*\.\s*\$(?:this->)?(?P<prop2>[A-Za-z_]\w*)",
+    re.S,
+)
+
+
+def interpolated_hook(argument: str) -> tuple[str, str] | None:
+    """(literal prefix, property name) for a hook name built by interpolation."""
+    match = _INTERPOLATED.match(argument)
+    if not match:
+        return None
+    prefix = match.group("prefix") or match.group("prefix2")
+    prop = match.group("prop") or match.group("prop2")
+    return (prefix, prop) if prefix and prop else None
+
+
+def scan_file(
+    path: Path, source: str, properties: dict[str, set[str]] | None = None
+) -> list[EntryPoint]:
+    """Entry points in one file.
+
+    `properties` maps class-property names to the literals assigned to them
+    anywhere in the project, so a hook registered as
+    `add_action("wp_ajax_nopriv_{$this->action}", ...)` can still be resolved.
+    Without it, only same-file properties are available.
+    """
     blanked = blank_noncode(source)
     defined = functions(source, blanked)
     by_name: dict[str, Function] = {}
     for function in defined:
         by_name.setdefault(function.name, function)
 
+    known = dict(property_literals(source, blanked))
+    for name, values in (properties or {}).items():
+        known.setdefault(name, set()).update(values)
+
     found: list[EntryPoint] = []
+    unresolved: list[str] = []
 
     def resolve(entry: EntryPoint) -> EntryPoint:
         target = by_name.get(method_of(entry.callback))
@@ -158,8 +201,38 @@ def scan_file(path: Path, source: str) -> list[EntryPoint]:
         if len(call.args) < 2:
             continue
         hook = literal(call.args[0])
+
         if not hook:
+            # The hook name may be built by interpolation from a property. Emit
+            # one entry point per known value of that property; over-reporting
+            # here is the right trade, because the alternative is a hook that is
+            # invisible to the whole tool.
+            resolved = interpolated_hook(call.args[0])
+            if resolved:
+                prefix, prop = resolved
+                for value in sorted(known.get(prop, ())):
+                    candidate = prefix + value
+                    kind = _hook_kind(candidate)
+                    if not kind:
+                        continue
+                    entry = resolve(
+                        EntryPoint(
+                            kind=kind[0],
+                            hook=candidate,
+                            callback=callback_name(call.args[1]),
+                            file=path,
+                            line=call.line,
+                        )
+                    )
+                    entry.notes.append(
+                        f"hook name resolved from ${prop}; the literal never "
+                        "appears in the source"
+                    )
+                    found.append(entry)
+                continue
+            unresolved.append(call.args[0][:60])
             continue
+
         kind = _hook_kind(hook)
         if kind:
             found.append(
@@ -208,6 +281,17 @@ def scan_file(path: Path, source: str) -> list[EntryPoint]:
 
     found.extend(_rest_routes(path, source, blanked, resolve))
     found.extend(_registered_meta(path, source, blanked))
+
+    # Hook names this pass could not resolve are coverage the tool does not
+    # have. Recording them beats dropping them silently: an unresolved hook is
+    # exactly where a missed entry point hides.
+    for raw in unresolved:
+        entry = EntryPoint(
+            kind="unresolved", hook=raw, callback="?", file=path, line=0
+        )
+        entry.notes.append("dynamic hook name — not analysed")
+        found.append(entry)
+
     return found
 
 

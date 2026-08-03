@@ -125,6 +125,43 @@ Release ZIPs are compared rather than SVN trees, because what ships to users is
 decided by the `Stable Tag:` line in trunk/readme.txt, and SVN lets an author
 modify an existing tag after release.
 
+## Rules that came out of real hunting
+
+Every rule below was added after the tool got something wrong against a shipping
+plugin. They are listed because the mistakes are more informative than the hits.
+
+**Hook names built from a property are resolved.** A base class registering
+`add_action( "wp_ajax_nopriv_{$this->action}", … )`, with each subclass setting
+`var $action = '…'`, produces a hook whose literal name never appears anywhere in
+the source. The first version of this tool did not list those endpoints at all —
+a false negative on a plugin with two million installs, where the hidden endpoint
+returned the site's user list to anonymous callers. Property literals are now
+collected project-wide and used to reconstruct the names. Hooks that still cannot
+be resolved are reported as `unresolved` rather than dropped, because an
+unresolved hook is exactly where a missed entry point hides.
+
+**Missing authorization on a READ is still CWE-862.** Ranking only
+state-changing sinks left a handler that merely returns `WP_User_Query` results
+looking identical to one that returns a list of post titles.
+
+**A nonce minted only for administrators does not make a handler
+subscriber-reachable.** If every `wp_create_nonce()` for an action sits inside a
+role-gated branch, no lower role is ever issued one, and the effective bar is
+that role — not "any logged-in user".
+
+**A callback the hook cannot even invoke is not a finding.**
+`do_action("admin_post_{$action}")` passes no arguments, so a two-parameter
+handler raises `ArgumentCountError` instead of doing anything.
+
+**An option only ever written with a boolean is a flag, not a setting.**
+Deleting a one-shot activation marker is not the same as writing a licence key,
+and ranking them together is how a scanner gets muted.
+
+**Dispatch primitives are only sinks when what reaches them is tainted.**
+Reporting `call_user_func()` unconditionally produces the evidence line
+"state-changing call: call_user_func()", which is technically true and entirely
+useless.
+
 ## What it cannot see
 
 An audit tool that oversells itself is worse than none, so these are stated

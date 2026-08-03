@@ -33,7 +33,9 @@ def findings_for(name: str, with_index: bool = False):
     path = FIXTURES / name
     source = path.read_text(encoding="utf-8")
     index = build_index(FIXTURES) if with_index else None
-    return rank(analyse_file(path, source, scan_file(path, source), index))
+    properties = index.properties if index else None
+    entries = scan_file(path, source, properties)
+    return rank(analyse_file(path, source, entries, index))
 
 
 def entries_for(name: str):
@@ -249,6 +251,78 @@ class TestCrossFileGuards(unittest.TestCase):
         self.assertIn("demo_current_user_can_admin", index.guard_names)
         # A helper with no capability call must not be treated as a guard.
         self.assertNotIn("rest_status", index.guard_names)
+
+
+class TestFieldReportRules(unittest.TestCase):
+    """Rules derived from a real hunting session against shipping plugins.
+
+    Each case is either a false positive that wasted review time, or — in the
+    interpolated-hook case — a confirmed false negative on a plugin with two
+    million installs. Fixtures carry the provenance in their docblocks.
+    """
+
+    def test_interpolated_hook_name_is_resolved(self):
+        """The confirmed false negative: hook built from a class property."""
+        entries = scan_file(
+            FIXTURES / "interpolated_hook_name.php",
+            (FIXTURES / "interpolated_hook_name.php").read_text(encoding="utf-8"),
+            build_index(FIXTURES).properties,
+        )
+        hooks = {entry.hook for entry in entries}
+        self.assertIn(
+            "wp_ajax_nopriv_demo/ajax/query_users",
+            hooks,
+            f"interpolated hook still invisible; found: {sorted(hooks)}",
+        )
+
+    def test_unauthenticated_user_enumeration_ranks_high(self):
+        findings = findings_for("interpolated_hook_name.php", with_index=True)
+        match = [f for f in findings if "nopriv" in f.entry.hook]
+        self.assertTrue(match, "no finding for the unauthenticated user query")
+        self.assertEqual(match[0].severity, "high")
+        self.assertEqual(match[0].tier, "unauth")
+        self.assertTrue(
+            any("nonce" in line.lower() for line in match[0].evidence),
+            "a nonce-only guard should be called out explicitly",
+        )
+
+    def test_arity_mismatch_is_not_reported(self):
+        findings = findings_for("hook_arity_mismatch.php", with_index=True)
+        self.assertEqual(
+            [], findings,
+            "a callback the hook cannot even invoke was reported: "
+            + " | ".join(f.title for f in findings),
+        )
+
+    def test_flag_only_option_write_is_not_high(self):
+        findings = findings_for("flag_only_sink.php", with_index=True)
+        high = [f for f in findings if f.severity == "high"]
+        self.assertEqual(
+            [], high,
+            "deleting a one-shot activation flag ranked high: "
+            + " | ".join(f.title for f in high),
+        )
+
+    def test_guard_in_a_static_delegate_is_found(self):
+        findings = findings_for("guard_in_static_delegate.php", with_index=True)
+        no_guard_claims = [
+            f for f in findings
+            if any("no capability check" in line or "no guard of any kind" in line
+                   for line in f.evidence)
+        ]
+        self.assertEqual(
+            [], no_guard_claims,
+            "claimed there is no guard while a delegate performs the nonce check",
+        )
+
+    def test_nonce_minted_only_for_admins_lowers_the_claim(self):
+        findings = findings_for("nonce_scoped_by_role.php", with_index=True)
+        subscriber_claims = [f for f in findings if f.tier == "subscriber"]
+        self.assertEqual(
+            [], subscriber_claims,
+            "reported subscriber reach for an action whose nonce is only ever "
+            "issued to administrators",
+        )
 
 
 class TestRanking(unittest.TestCase):
