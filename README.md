@@ -1,5 +1,7 @@
 # wp-authz-audit
 
+[![tests](https://github.com/kubakozub/wp-authz-audit/actions/workflows/tests.yml/badge.svg)](https://github.com/kubakozub/wp-authz-audit/actions/workflows/tests.yml)
+
 Find the WordPress plugin code an attacker can reach, and check whether anything
 is guarding it.
 
