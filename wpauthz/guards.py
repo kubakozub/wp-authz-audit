@@ -5,8 +5,8 @@ Most scanners get this wrong in the same way: they see any of `wp_verify_nonce`,
 it protected. Each of those answers a different question:
 
   * A nonce proves the request was INTENDED by the user who sent it. That is
-    CSRF defence. A subscriber can legitimately obtain nonces — plugins hand
-    them to the browser through wp_localize_script — so a nonce never
+    CSRF defence. A subscriber can legitimately obtain nonces: plugins hand
+    them to the browser through wp_localize_script, so a nonce never
     establishes that the caller is ALLOWED to perform the action.
   * `is_admin()` is true for any request to /wp-admin/admin-ajax.php, including
     an unauthenticated one. It means "this is an admin-area request", never
@@ -19,7 +19,7 @@ Only the capability family actually answers "may this user do this".
 
 The second distinction, which is where the interesting bugs live: WordPress
 splits PRIMITIVE capabilities from META capabilities. `current_user_can(
-'edit_posts')` asks whether the user may edit posts in general — every
+'edit_posts')` asks whether the user may edit posts in general, every
 Contributor may. `current_user_can('edit_post', $id)` runs map_meta_cap()
 against that specific object and is what actually enforces ownership. A handler
 that takes an object id from the request, checks only the primitive capability,
@@ -66,7 +66,7 @@ NONCE_ACTION_POSITION = {
 PSEUDO_GUARDS = {
     "is_admin": (
         "is_admin() is true for any request to admin-ajax.php, including "
-        "unauthenticated ones — it is not a privilege check"
+        "unauthenticated ones, it is not a privilege check"
     ),
     "is_user_logged_in": (
         "is_user_logged_in() separates anonymous from authenticated; on a site "
@@ -146,7 +146,7 @@ OBJECT_READ_SINKS = {
 }
 
 # Reads that disclose data about OTHER people. Missing authorization on a read
-# is still CWE-862 — the tool used to rank only state-changing sinks, which left
+# is still CWE-862: the tool used to rank only state-changing sinks, which left
 # a handler that merely returns the site's user list behind a nonce looking
 # identical to one that returns a list of post titles.
 DISCLOSURE_SINKS = frozenset(
@@ -192,7 +192,7 @@ GLOBAL_WRITE_SINKS = frozenset(
 
 # Dangerous only when what reaches them is attacker-controlled. Reporting these
 # unconditionally is how a scanner ends up saying "state-changing call:
-# call_user_func()" about a plugin's own internal dispatch — technically a call,
+# call_user_func()" about a plugin's own internal dispatch, technically a call,
 # entirely useless as evidence, and it drowns the findings that matter.
 TAINT_DEPENDENT_SINKS = frozenset(
     {
@@ -377,7 +377,7 @@ def sinks(body: str, base_line: int = 1) -> list[Sink]:
 
     `tainted_object_id` is intentionally shallow: it is true when the argument
     at the object-id position mentions a superglobal or REST parameter directly.
-    A value laundered through a local variable is missed — see the README's
+    A value laundered through a local variable is missed, see the README's
     limits section. Shallow and honest beats deep and wrong here, because a
     false "safe" is the failure that matters.
     """

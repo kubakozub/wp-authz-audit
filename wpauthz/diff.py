@@ -2,7 +2,7 @@
 
 Reviewing changed lines is the obvious approach and it is the wrong one. A
 release diff is mostly refactors, translations and asset churn, so line-level
-review puts you back where you started — reading a lot to find a little.
+review puts you back where you started: reading a lot to find a little.
 
 Comparing the entry-point GRAPH answers a narrower and far more useful question:
 did anything become reachable that was not, or did a guard get weaker? Four
@@ -13,8 +13,8 @@ regressions are worth a human's attention:
   guard_removed        a capability check present in the old handler is gone
   sink_added           a new state-changing call inside an already-unguarded handler
 
-Everything else — new code that is guarded the same way as before, cosmetic
-churn, moved files — is silence. That silence is the point.
+Everything else: new code that is guarded the same way as before, cosmetic
+churn, moved files: is silence. That silence is the point.
 """
 
 from __future__ import annotations

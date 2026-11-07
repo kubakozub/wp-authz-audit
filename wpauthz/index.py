@@ -20,8 +20,8 @@ turns a four-second scan into a minute. The cap is a limit, and it is documented
 as one rather than hidden.
 
 The index is keyed by BARE function name and keeps every definition of each
-name. Keying by bare name is imprecise — two classes may both define
-`get_results()` — but keeping only the first silently resolved a delegation to
+name. Keying by bare name is imprecise (two classes may both define
+`get_results()`), but keeping only the first silently resolved a delegation to
 the wrong method, which hid a handler that returns the site's user list. Keeping
 all of them over-approximates instead, which is the safe direction here.
 """
@@ -51,7 +51,7 @@ _NONCE_MINT = re.compile(r"wp_create_nonce\s*\(\s*['\"]([^'\"]+)['\"]")
 # A helper only counts as a guard source if it plausibly performs a check.
 # Nonce functions are included even though a nonce is NOT authorization: if a
 # delegate does the nonce check, the analyser must see it, otherwise the finding
-# says "no guard at all" when the truth is "only CSRF defence" — a different and
+# says "no guard at all" when the truth is "only CSRF defence", a different and
 # less alarming claim, and the difference is the whole point of the tool.
 _GUARDISH = re.compile(
     r"|".join(
@@ -178,7 +178,7 @@ class ProjectIndex:
         forge one for their own session, so the real bar is that gate.
 
         Returns None when at least one emission site is ungated, or when no
-        emission site is found at all — the safe answer in both cases is "do
+        emission site is found at all: the safe answer in both cases is "do
         not raise the bar".
         """
         pattern = re.compile(
@@ -208,7 +208,7 @@ class ProjectIndex:
         `wp_create_nonce('x')`, then every handler guarded only by a nonce for
         'x' is effectively unauthenticated: the attacker fetches a token from
         the public endpoint and replays it. Plugins ship these token vendors
-        deliberately — public forms need them — which is what makes the pattern
+        deliberately (public forms need them), which is what makes the pattern
         both common and easy to miss.
         """
         actions: set[str] = set()
@@ -232,7 +232,7 @@ class ProjectIndex:
         """Names called in a body that this index knows about.
 
         Extracts identifiers from the body once and intersects with the index,
-        rather than searching for every known name in turn — the latter is
+        rather than searching for every known name in turn: the latter is
         O(functions x handlers) and gets slow on a large plugin.
         """
         blanked = blank_noncode(body)
@@ -243,7 +243,7 @@ class ProjectIndex:
     def inline_callees(self, body: str, depth: int = 2) -> str:
         """Body plus the bodies of everything it calls, for sink detection.
 
-        Guard inlining is deliberately narrow — only guard-like helpers — so
+        Guard inlining is deliberately narrow (only guard-like helpers), so
         that an unrelated capability check elsewhere cannot make a handler look
         protected. Sink detection needs the opposite bias: a handler that
         delegates its actual work to `$this->get_results()` still performs
@@ -279,7 +279,7 @@ class ProjectIndex:
 
         Only guard-like helpers are inlined. Pulling in every callee would make
         unrelated capability checks elsewhere in the plugin look like they
-        protect this handler, which trades false positives for false negatives —
+        protect this handler, which trades false positives for false negatives:
         the worse direction for an audit tool.
         """
         if depth <= 0 or not body:

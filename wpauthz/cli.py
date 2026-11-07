@@ -2,7 +2,7 @@
 
 Five modes, in order of how much time each saves:
 
-  map     enumerate every entry point in a plugin directory — the triage view
+  map     enumerate every entry point in a plugin directory: the triage view
   audit   rank findings for one plugin (local directory, or slug[@version])
   diff    guard-set regression between two releases of the same plugin
   compare guard asymmetry between sibling plugins (one vendor's family)
@@ -10,7 +10,7 @@ Five modes, in order of how much time each saves:
 
 `diff` is the one that scales. Reviewing changed LINES produces noise: refactors,
 i18n, asset churn. Comparing the entry-point GRAPH between releases produces a
-short list of things that are actually new or actually weaker — a new
+short list of things that are actually new or actually weaker, a new
 unauthenticated handler, a permission_callback that became __return_true, a
 capability check that disappeared.
 """
@@ -83,7 +83,7 @@ def _relative(path: Path, root: Path) -> str:
 
 def print_findings(findings: list[Finding], root: Path, colour: bool) -> None:
     if not findings:
-        print("No authorization findings. This is not proof the plugin is safe — "
+        print("No authorization findings. This is not proof the plugin is safe: "
               "see the limits section in the README.")
         return
 
@@ -146,7 +146,7 @@ def command_audit(args: argparse.Namespace) -> int:
     if getattr(args, "bar", None) == "unauth-impact":
         # The submission bar, enforced by the tool instead of by discipline:
         # unauthenticated reach AND a sink that touches something worth having.
-        # Derived from real programme rejections — mid-privilege findings and
+        # Derived from real programme rejections: mid-privilege findings and
         # bare information disclosure were both refused.
         before = len(findings)
         findings = [
@@ -164,7 +164,7 @@ def command_audit(args: argparse.Namespace) -> int:
             indent=2,
         ))
     else:
-        print(f"# {label} — {len(entries)} entry points\n")
+        print(f"# {label}: {len(entries)} entry points\n")
         print_findings(findings, root, args.colour)
 
     return 1 if any(f.severity == "high" for f in findings) else 0
@@ -271,7 +271,7 @@ def command_compare(args: argparse.Namespace) -> int:
 
 
 def command_watch(args: argparse.Namespace) -> int:
-    """Audit the most recently updated plugins — the discovery worklist."""
+    """Audit the most recently updated plugins: the discovery worklist."""
     slugs = args.slugs or recently_updated(args.count, args.cache)
     ranked = []
     below_threshold: list[tuple[str, int]] = []
@@ -348,7 +348,7 @@ def command_watch(args: argparse.Namespace) -> int:
             print(f"  below threshold: {slug} ({installs:,} installs)")
     print(f"{len(ranked)} of {scanned} scanned plugin(s) have high-severity findings")
     if scanned and not ranked:
-        print("Nothing scanned means nothing found — not that the plugins are clean.")
+        print("Nothing scanned means nothing found, not that the plugins are clean.")
     return 0
 
 

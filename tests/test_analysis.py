@@ -256,8 +256,8 @@ class TestCrossFileGuards(unittest.TestCase):
 class TestFieldReportRules(unittest.TestCase):
     """Rules derived from a real hunting session against shipping plugins.
 
-    Each case is either a false positive that wasted review time, or — in the
-    interpolated-hook case — a confirmed false negative on a plugin with two
+    Each case is either a false positive that wasted review time, or (in the
+    interpolated-hook case) a confirmed false negative on a plugin with two
     million installs. Fixtures carry the provenance in their docblocks.
     """
 
@@ -329,7 +329,7 @@ class TestBootstrapPrecision(unittest.TestCase):
     """Measured regression: bootstrap hooks are not dispatch points.
 
     Treating every early hook like admin_init produced 251 of 435 high-severity
-    findings across 60 popular plugins — all of them plugins loading themselves.
+    findings across 60 popular plugins, all of them plugins loading themselves.
     'Runs before any authentication branch' is true of `init -> initHooks` and
     tells a reviewer nothing.
     """
@@ -432,7 +432,7 @@ class TestInheritanceResolution(unittest.TestCase):
     One plugin's base class registers its public hook behind
     `if ( $this->public )`. Reading that property from the base and applying it
     to every subclass predicted 13 nopriv actions where the live site had 9, and
-    attributed one subclass's WP_User_Query to all of them — five findings on
+    attributed one subclass's WP_User_Query to all of them, five findings on
     one dispatcher line, four of them false.
     """
 

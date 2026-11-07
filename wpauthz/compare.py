@@ -7,7 +7,7 @@ Vendors ship families: a free and a pro edition, a fork, or four products built
 on one shared framework. The same function appears in all of them, usually with
 the same name, because it started as the same code. When one sibling checks
 something the others do not, that asymmetry is worth more than any absolute
-judgement about a single plugin — the siblings act as each other's specification.
+judgement about a single plugin: the siblings act as each other's specification.
 
 The strongest signal is a guard present in the majority and absent in one:
 
@@ -21,7 +21,7 @@ took ten seconds to find and five minutes to settle, instead of reading four
 plugins end to end.
 
 Functions are matched on their QUALIFIED name (Class::method), plus bare names
-that are unambiguous within every tree — a rebranded fork keeps its method names
+that are unambiguous within every tree, a rebranded fork keeps its method names
 but not its class names. Matching on bare names alone and keeping the longest
 body made results depend on tree SIZE: the larger sibling was likelier to hold
 an unrelated class with a same-named longer method, which won the slot and got
@@ -162,7 +162,7 @@ def compare(trees: list[tuple[str, Path]], min_shared: int = 2) -> list[Divergen
 
     # Qualified names match a fork that kept its class names. A fork that
     # renamed them (a rebrand) still shares method names, so unambiguous bare
-    # names are matched too — "unambiguous" meaning exactly one definition of
+    # names are matched too: "unambiguous" meaning exactly one definition of
     # that bare name in every tree. Ambiguity was the actual bug: with several
     # candidates the largest body won, and that depended on tree size.
     per_plugin = {
@@ -233,8 +233,8 @@ def compare(trees: list[tuple[str, Path]], min_shared: int = 2) -> list[Divergen
 
     # Guard-call gaps first: they name a specific missing check, which is what a
     # reviewer can act on. Early-exit counts are a weaker, shape-level hint.
-    # A function is matched twice on purpose — once by qualified name, once by
-    # unambiguous bare name — so the same divergence arrives twice. Collapse on
+    # A function is matched twice on purpose: once by qualified name, once by
+    # unambiguous bare name, so the same divergence arrives twice. Collapse on
     # what a reader actually sees.
     deduped: dict[tuple[str, str], Divergence] = {}
     for divergence in divergences:

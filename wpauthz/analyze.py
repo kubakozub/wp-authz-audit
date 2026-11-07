@@ -178,7 +178,7 @@ def analyse_file(
         body, body_line = _body_for(entry, source)
 
         # A callback that requires more arguments than its hook supplies cannot
-        # run at all — do_action("admin_post_{$action}") passes none, so a
+        # run at all: do_action("admin_post_{$action}") passes none, so a
         # two-parameter handler raises ArgumentCountError rather than doing
         # anything. If it also reads no request data, there is nothing an
         # attacker drives, and reporting it is noise.
@@ -302,7 +302,7 @@ def _judge(
     findings: list[Finding] = []
 
     def add(severity, cwe, title, evidence, sink=None, at_tier=None):
-        # entry.notes carry provenance the reviewer needs — most importantly
+        # entry.notes carry provenance the reviewer needs, most importantly
         # that a hook name was reconstructed from a property, which means the
         # handler body may belong to a sibling class and the sink should be
         # confirmed against the right one before believing the finding.
@@ -387,7 +387,7 @@ def _judge(
                 "Unauthenticated handler writes a flag option",
                 [f"{entry.hook} is reachable with no credentials",
                  f"{flag_writes[0].function}() targets an option only ever written "
-                 "with a boolean — confirm what it actually gates"],
+                 "with a boolean, confirm what it actually gates"],
                 flag_writes[0], "unauth")
 
     elif entry.kind in ("ajax", "admin_post"):
@@ -435,7 +435,7 @@ def _judge(
                 "operation with no capability check",
                 [f"{entry.hook} is reachable by any authenticated user, including subscribers",
                  f"state-changing call: {writes[0].function}()",
-                 "only a nonce check is present — that is CSRF defence, not authorization"
+                 "only a nonce check is present: that is CSRF defence, not authorization"
                  if nonce_guards else "no capability check in the handler"],
                 writes[0], "subscriber")
         elif not capability_guards and identity_reads:
@@ -443,7 +443,7 @@ def _judge(
                 "Handler reachable by any logged-in user returns data about other users",
                 [f"{entry.hook} is reachable by any authenticated user, including subscribers",
                  f"discloses via {identity_reads[0].function}",
-                 "only a nonce check is present — that is CSRF defence, not authorization"
+                 "only a nonce check is present: that is CSRF defence, not authorization"
                  if nonce_guards else "no capability check in the handler"],
                 identity_reads[0], "subscriber")
         elif capability_guards and tainted_writes:
@@ -476,7 +476,7 @@ def _judge(
             add("info", "CWE-862",
                 f"{entry.hook} handler writes a flag option",
                 [f"{flag_writes[0].function}() targets an option only ever written with "
-                 "a boolean — a one-shot flag, not a settings write"],
+                 "a boolean, a one-shot flag, not a settings write"],
                 flag_writes[0], "unauth")
         elif reads_request and not capability_guards:
             add("low", "CWE-862", f"{entry.hook} handler reads request data unguarded",
@@ -491,7 +491,7 @@ def _judge(
         if reads_request and writes and not capability_guards:
             add("medium", "CWE-862",
                 f"{entry.hook} handler acts on request data with no capability check",
-                [f"{entry.hook} is a plugin bootstrap hook, not a request dispatcher — "
+                [f"{entry.hook} is a plugin bootstrap hook, not a request dispatcher, "
                  "confirm the handler is actually reachable with attacker-controlled input",
                  f"state-changing call: {writes[0].function}()"],
                 writes[0], "unauth")
@@ -516,7 +516,7 @@ def _judge(
             ]
             if not sensitive:
                 evidence.append(
-                    f"'{key}' does not look security-relevant — confirm what writing it "
+                    f"'{key}' does not look security-relevant, confirm what writing it "
                     "actually changes before treating this as a finding"
                 )
             add("high" if sensitive else "medium", "CWE-862",

@@ -25,7 +25,7 @@ boundary. Missing capability checks there are the classic privilege escalation.
 both wp-admin/admin-ajax.php and wp-admin/admin-post.php fire `do_action(
 'admin_init')` BEFORE they branch on `is_user_logged_in()`. An admin_init
 handler that reads `$_GET` and acts on it is reachable by an anonymous request.
-Handlers on these hooks are only reported when they actually read request data —
+Handlers on these hooks are only reported when they actually read request data:
 otherwise every plugin would produce dozens of empty findings.
 """
 
@@ -176,7 +176,7 @@ def interpolated_hook(argument: str) -> tuple[str, str, bool] | None:
     from a class, from a bare `$action`, which inside a helper such as
     `register_ajax( $action, $callback )` is a parameter and takes whatever the
     caller passes. Treating the two alike meant every literal seen anywhere in
-    the plugin was pasted into every generic registration site — one plugin
+    the plugin was pasted into every generic registration site, one plugin
     gained four nopriv endpoints that a live $wp_filter dump says do not exist.
     """
     match = _INTERPOLATED.match(argument)
@@ -389,7 +389,7 @@ def scan_file(
         entry = EntryPoint(
             kind="unresolved", hook=raw, callback="?", file=path, line=0
         )
-        entry.notes.append("dynamic hook name — not analysed")
+        entry.notes.append("dynamic hook name: not analysed")
         found.append(entry)
 
     return found
@@ -403,7 +403,7 @@ def _registered_meta(path: Path, source: str, blanked: str) -> list[EntryPoint]:
 
     With show_in_rest true and auth_callback returning true, any user who can
     reach the object's REST endpoint can write that meta key. Omitting
-    auth_callback is safe — core defaults to a capability check — so only an
+    auth_callback is safe (core defaults to a capability check), so only an
     explicit permissive callback is a finding.
     """
     found: list[EntryPoint] = []

@@ -10,7 +10,7 @@ What it does give you, and why each piece is load-bearing:
   * `blank_noncode()` replaces the contents of comments and string literals with
     filler of the same length. Every offset stays valid, but a match can no
     longer land inside a docblock or a string. Without this step, a plugin that
-    merely mentions `current_user_can` in a comment reads as protected — and a
+    merely mentions `current_user_can` in a comment reads as protected, and a
     tool that says "protected" when it means "the words appear nearby" is worse
     than no tool.
   * `functions()` finds function and method definitions with their real body
@@ -167,7 +167,7 @@ class Function:
 
     @property
     def required_arity(self) -> int:
-        """Parameters with no default and no variadic — what PHP demands."""
+        """Parameters with no default and no variadic: what PHP demands."""
         if not self.params.strip():
             return 0
         count = 0
@@ -261,7 +261,7 @@ def classes(source: str, blanked: str | None = None) -> list[ClassInfo]:
     """Classes with their parent, own property literals, and method bodies.
 
     Inheritance matters more here than it looks. A base class registering a hook
-    behind `if ( $this->public )` is not a statement about the base class — it is
+    behind `if ( $this->public )` is not a statement about the base class, it is
     a statement about whichever subclass is instantiated. Reading the property
     from the base and applying it to every descendant reports endpoints that do
     not exist; resolving it per subclass is the difference between a list of
@@ -319,7 +319,7 @@ def property_literals(source: str, blanked: str | None = None) -> dict[str, set[
     """Class properties assigned a string literal, by property name.
 
     WordPress plugins routinely register hooks from a property rather than a
-    literal — `add_action( "wp_ajax_nopriv_{$this->action}", ... )` in a base
+    literal: `add_action( "wp_ajax_nopriv_{$this->action}", ... )` in a base
     class, with each subclass setting `var $action = '...'`. The literal hook
     name never appears in the source, so a purely literal scan is blind to the
     entry point entirely. Collecting the property values makes those hooks

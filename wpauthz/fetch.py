@@ -1,7 +1,7 @@
 """Fetch plugin releases from wordpress.org into a local cache.
 
 This is the only module that touches the network, and it only ever talks to
-wordpress.org — never to a site under test. Everything downstream runs offline
+wordpress.org, never to a site under test. Everything downstream runs offline
 against the cache, which matters for two reasons: your hunting hypotheses stay
 on your own disk, and a re-run produces the same answer as the first run.
 
@@ -147,7 +147,7 @@ def plugin_root(extracted: Path) -> Path:
 
 
 def recently_updated(count: int, cache: Path) -> list[str]:
-    """Slugs of the most recently updated plugins — the discovery worklist."""
+    """Slugs of the most recently updated plugins: the discovery worklist."""
     query = urllib.parse.urlencode(
         {
             "action": "query_plugins",
