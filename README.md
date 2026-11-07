@@ -209,6 +209,31 @@ Reporting `call_user_func()` unconditionally produces the evidence line
 "state-changing call: call_user_func()", which is technically true and entirely
 useless.
 
+## The bug class this is built for
+
+This is one of three tools around a single class of bug: code a low-privilege or
+unauthenticated caller can reach, performing an operation nobody checked they were allowed
+to perform.
+
+The reason that class is worth a toolchain is that it scales past what it looks like. In
+WordPress core, HackerOne [#3931777](https://hackerone.com/reports/3931777), the lowest role
+allowed to upload files could delete `wp-config.php`, and a WordPress with no `wp-config.php`
+hands its installer, and the database behind it, to any visitor. The defect is a missing
+authorization check on a file operation. The impact is site takeover from the lowest
+publishing role, which is CVSS 9.9. A second finding in the same area,
+[#3931771](https://hackerone.com/reports/3931771), scored 9.0. The write-up of the first,
+with the exploit session replayed, is at
+[jakubkozub.com/research/wordpress-media-finalize](https://jakubkozub.com/research/wordpress-media-finalize/).
+
+| Tool | The question it answers |
+|---|---|
+| [wp-hook-guard](https://github.com/kubakozub/wp-hook-guard) | Which entry points exist in this plugin, and which of them are reachable and undefended? |
+| [wp-authz-audit](https://github.com/kubakozub/wp-authz-audit) | Of those, which actually matter, by the privilege genuinely required, and what changed between two releases? |
+| [detections](https://github.com/kubakozub/detections) | Once such a bug is exploited, what does it leave in the logs? Sigma rules with Splunk, ES\|QL and KQL renderings, tested on real engines. |
+
+The first two are the attacker's side of the question and the third is the defender's. The
+same finding produced all three.
+
 ## What it cannot see
 
 An audit tool that oversells itself is worse than none, so these are stated
