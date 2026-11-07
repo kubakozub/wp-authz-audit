@@ -7,10 +7,17 @@ on:
 
 jobs:
   unittest:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        python-version: ["3.9", "3.11", "3.13"]
+        python-version: ['3.11', '3.12', '3.13']
+        os: [ubuntu-latest]
+        include:
+          # 3.9 is past end of life and setup-python can no longer provision it
+          # on ubuntu-latest. The code still supports it, so the claim is tested
+          # on the last image that ships the interpreter.
+          - python-version: '3.9'
+            os: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
