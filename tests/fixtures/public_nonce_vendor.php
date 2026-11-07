@@ -1,6 +1,6 @@
 <?php
 /**
- * POSITIVE — the shape that produced the only confirmed finding of the day.
+ * POSITIVE: the shape that produced the only confirmed finding of the day.
  *
  * A nopriv endpoint hands out a nonce; another handler is guarded by nothing
  * but that same nonce. An anonymous caller fetches a valid token from the

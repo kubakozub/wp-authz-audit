@@ -1,6 +1,6 @@
 <?php
 /**
- * NEGATIVE — must not be reported.
+ * NEGATIVE: must not be reported.
  *
  * From ml-slider 3.111.1 (ml-slider.php:327). A programmatic helper is ALSO
  * registered on admin_post_. do_action("admin_post_{$action}") passes no

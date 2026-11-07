@@ -1,5 +1,5 @@
 <?php
-/** Public and discloses users — the only true positive here. */
+/** Public and discloses users: the only true positive here. */
 class Demo_Query_Users extends Demo_Base {
     var $action = 'demo/ajax/query_users';
     var $public = true;

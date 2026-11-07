@@ -1,6 +1,6 @@
 <?php
 /**
- * NEGATIVE — the shape that collapsed precision.
+ * NEGATIVE: the shape that collapsed precision.
  *
  * Measured across 60 popular plugins: 251 of 435 high-severity findings were
  * handlers exactly like these. Every plugin registers something on init and

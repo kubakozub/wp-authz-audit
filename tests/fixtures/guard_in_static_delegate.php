@@ -1,6 +1,6 @@
 <?php
 /**
- * NEGATIVE — must not be reported.
+ * NEGATIVE: must not be reported.
  *
  * From wp-fastest-cache 1.5.0. The AJAX callback is a two-line wrapper that
  * include_once's a file and delegates to a STATIC method; the nonce check lives

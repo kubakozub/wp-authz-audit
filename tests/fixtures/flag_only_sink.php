@@ -1,6 +1,6 @@
 <?php
 /**
- * NEGATIVE — reachable unauthenticated, but must not be ranked high.
+ * NEGATIVE: reachable unauthenticated, but must not be ranked high.
  *
  * From ml-slider 3.111.1 (ml-slider.php:322). admin_init does fire before the
  * authentication branch, so reachability is real. The sink deletes a one-shot
@@ -9,7 +9,7 @@
  *
  * Same family as the _acf_changed case already documented in the README.
  * Rule to add: delete_option/update_option on an option that is only ever
- * written with a boolean/flag value carries no impact — report at most INFO.
+ * written with a boolean/flag value carries no impact, so report at most INFO.
  */
 
 class Demo_Flag {

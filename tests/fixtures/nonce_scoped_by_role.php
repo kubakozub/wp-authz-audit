@@ -1,13 +1,13 @@
 <?php
 /**
- * NEGATIVE for the "subscriber" label — required privilege is administrator.
+ * NEGATIVE for the "subscriber" label: required privilege is administrator.
  *
  * From wp-fastest-cache 1.5.0. The handler's only guard is a nonce, which reads
  * as CWE-862 [subscriber]. But the nonce is minted solely inside an admin-bar
  * node that is added only when the current user's roles intersect
  * array('administrator'). A subscriber is never issued a nonce for this action
  * and cannot forge one for their own session, so the handler is admin-only in
- * default configuration — which the Wordfence program excludes.
+ * default configuration, which the Wordfence program excludes.
  *
  * Rule to add: resolve where wp_create_nonce(<action>) is emitted. If every
  * emission site is inside a role/capability-gated branch, raise the reported

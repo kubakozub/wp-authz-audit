@@ -1,6 +1,6 @@
 <?php
 /**
- * POSITIVE — currently MISSED. This is the false negative to close.
+ * POSITIVE: currently MISSED. This is the false negative to close.
  *
  * From advanced-custom-fields 6.8.6 / secure-custom-fields 6.9.4. The base class
  * registers its hook from a property: add_action( "wp_ajax_nopriv_{$this->action}" ).
@@ -47,7 +47,7 @@ class Demo_Ajax_Query_Users extends Demo_Ajax_Base {
     var $public = true;
 
     public function verify_request( $request ) {
-        /* nonce only — no capability check anywhere on this path */
+        /* nonce only, no capability check anywhere on this path */
         return wp_verify_nonce( $request['nonce'], 'demo_field_' . $request['field_key'] );
     }
 
